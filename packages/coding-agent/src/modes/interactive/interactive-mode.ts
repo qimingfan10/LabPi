@@ -123,6 +123,8 @@ import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
+import { getLabRegistry, labCommandLines, labCommandRuns, labCommandClaims } from "../../core/tools/lab.ts";
+import { experimentBrief, recallMetrics, workerStatusView } from "@earendil-works/pi-lab";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
@@ -3331,7 +3333,23 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/fork") {
+						if (
+				text === "/lines" ||
+				text === "/runs" ||
+				text.startsWith("/runs ") ||
+				text === "/brief" ||
+				text.startsWith("/brief ") ||
+				text === "/metrics" ||
+				text.startsWith("/metrics ") ||
+				text === "/claims" ||
+				text.startsWith("/claims ") ||
+				text === "/workers"
+			) {
+				this.editor.setText("");
+				void this.handleLabCommand(text);
+				return;
+			}
+if (text === "/fork") {
 				this.showUserMessageSelector();
 				this.editor.setText("");
 				return;
@@ -6792,6 +6810,41 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private handleLabCommand(text: string): void {
+		try {
+			const reg = getLabRegistry(this.sessionManager.getCwd());
+			const parts = text.slice(1).split(/\s+/);
+			const [cmd, arg1, arg2] = parts;
+			let out: string;
+			switch (cmd) {
+				case "lines":
+					out = labCommandLines(reg);
+					break;
+				case "runs":
+					out = labCommandRuns(reg, arg1);
+					break;
+				case "brief":
+					out = arg1 ? experimentBrief(reg, arg1) : "Usage: /brief <line>";
+					break;
+				case "metrics":
+					out = recallMetrics(reg, { lineId: arg1, name: arg2 });
+					break;
+				case "claims":
+					out = labCommandClaims(reg, arg1);
+					break;
+				case "workers":
+					out = workerStatusView(reg);
+					break;
+				default:
+					out = "Unknown lab command";
+			}
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new ThemedText(() => out, 1, 0));
+			this.ui.requestRender();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
 	private handleSessionCommand(): void {
 		const stats = this.session.getSessionStats();
 		const sessionName = this.sessionManager.getSessionName();

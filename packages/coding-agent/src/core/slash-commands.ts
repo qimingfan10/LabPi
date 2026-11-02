@@ -40,5 +40,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume another session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
+	{ name: "lines", description: "List experiment lines in the lab ledger" },
+	{ name: "runs", description: "List experiment runs", argumentHint: "[line]" },
+	{ name: "brief", description: "Show the full brief of an experiment line", argumentHint: "<line>" },
+	{ name: "metrics", description: "Search metric trajectories in the lab ledger", argumentHint: "[line] [metric]" },
+	{ name: "claims", description: "List research claims and their status", argumentHint: "[status]" },
+	{ name: "workers", description: "Router view of direction workers (lab ledger)" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },
 ];

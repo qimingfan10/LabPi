@@ -148,6 +148,7 @@ import {
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { buildLabStateCard, createLabToolDefinitions, labBeforeToolCheck, LAB_TOOL_NAMES } from "./tools/lab.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
@@ -530,6 +531,7 @@ export class AgentSession {
 		this._installAgentBoundaryHooks();
 		this._installHiddenDeclarationsProjection();
 		this._installAgentForcedPromptProjection();
+		this._installLabStateCardProjection();
 
 		this._buildRuntime({
 			activeToolNames: this._initialActiveToolNames,
@@ -675,6 +677,10 @@ export class AgentSession {
 		{ toolCall, args }: BeforeToolCallContext,
 		parentToolCallId?: string,
 	): Promise<BeforeToolCallResult | undefined> {
+		const labCheck = labBeforeToolCheck(this._cwd, toolCall.name, args);
+		if (labCheck) {
+			return labCheck;
+		}
 		const runner = this._extensionRunner;
 		if (!runner.hasHandlers("tool_call")) {
 			return undefined;
@@ -1800,6 +1806,21 @@ export class AgentSession {
 	 * collapse into one head holding the forced text and the current tools. Runs after the
 	 * `context` extension handlers.
 	 */
+	/**
+	 * Inject the lab state card (current line, running runs, open claims) before every LLM
+	 * call. Regenerated each turn, so it survives compaction. Skipped entirely when the
+	 * ledger in this working directory is empty.
+	 */
+	private _installLabStateCardProjection(): void {
+		const previousTransformContext = this.agent.transformContext;
+		this.agent.transformContext = async (messages, signal) => {
+			const transformed = previousTransformContext ? await previousTransformContext(messages, signal) : messages;
+			const card = buildLabStateCard(this._cwd);
+			if (!card) return transformed;
+			return [{ role: "user", content: card, timestamp: Date.now() }, ...transformed];
+		};
+	}
+
 	/**
 	 * Remove the declarations that `prepareLoadout` hooks hide from every request. The whole
 	 * transcript is filtered with the current set, so the projected declarations stay consistent
@@ -3699,10 +3720,15 @@ export class AgentSession {
 						createToolDefinitionFromAgentTool(tool),
 					]),
 				)
-			: createAllToolDefinitions(this._cwd, {
-					read: { autoResizeImages },
-					bash: { commandPrefix: shellCommandPrefix, shellPath },
-				});
+			: {
+					...createAllToolDefinitions(this._cwd, {
+						read: { autoResizeImages },
+						bash: { commandPrefix: shellCommandPrefix, shellPath },
+					}),
+					...Object.fromEntries(
+						createLabToolDefinitions(this._cwd).map((def) => [def.name, def]),
+					),
+				};
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -3730,7 +3756,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", ...LAB_TOOL_NAMES];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

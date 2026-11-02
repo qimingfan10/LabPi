@@ -81,8 +81,9 @@ function deepMergeObjects(base: Record<string, unknown>, overrides: Record<strin
 	return result;
 }
 
-/** Tools enabled at startup when `defaultTools` does not change them. */
-export const DEFAULT_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write"];
+/** Tools enabled at startup when `defaultTools` does not change them. Lab tools are built-in research tooling and active by default. */
+import { LAB_TOOL_NAMES } from "./tools/lab.ts";
+export const DEFAULT_TOOL_NAMES: readonly string[] = ["read", "bash", "edit", "write", ...LAB_TOOL_NAMES];
 
 /** Whether a tool selection entry is a `+name` or `-name` modifier. */
 export function isToolModifier(entry: unknown): boolean {

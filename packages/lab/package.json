@@ -1,0 +1,47 @@
+{
+	"name": "@earendil-works/pi-lab",
+	"version": "1.4.0",
+	"description": "Research experiment discipline for pi: experiment ledger, evidence-linked claims, completion gates, statistics, and evaluation tooling",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"source": "./src/index.ts",
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md"
+	],
+	"scripts": {
+		"clean": "node ../../scripts/package-files.mjs clean dist",
+		"build": "tsc -p tsconfig.build.json",
+		"test": "node --test dist/test/*.test.js",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"keywords": [
+		"research",
+		"experiments",
+		"evaluation"
+	],
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/earendil-works/pi.git",
+		"directory": "packages/lab"
+	},
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@earendil-works/pi-ai": "1.4.0",
+		"@earendil-works/pi-agent-core": "1.4.0",
+		"typebox": "1.3.27"
+	},
+	"devDependencies": {
+		"@types/node": "22.19.19"
+	}
+}
