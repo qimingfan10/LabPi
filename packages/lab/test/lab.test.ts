@@ -1,10 +1,10 @@
-import { describe, expect, test } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { describe, expect, test } from "vitest";
+import { filterByDifficultyBand, validatePoolRows } from "../src/pool.ts";
+import { pairedTest, pairedTTest, wilcoxonSignedRank } from "../src/stats.ts";
 import { LabRegistry } from "../src/store.ts";
-import { pairedTest, wilcoxonSignedRank, pairedTTest } from "../src/stats.ts";
-import { validatePoolRows, filterByDifficultyBand } from "../src/pool.ts";
 
 describe("lab registry", () => {
 	test("line, run, metric, artifact, claim, fork", () => {
@@ -81,6 +81,94 @@ describe("lab pool", () => {
 		expect(report.valid).toBe(4);
 		const kept = filterByDifficultyBand(rows, 0.25, 0.75);
 		expect(kept.length).toBe(2);
+		rmSync(tmp, { recursive: true, force: true });
+	});
+});
+
+describe("lab governance", () => {
+	test("metric overwrite needs revise_reason; old value kept as history", () => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-gov-"));
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("base");
+		const run = reg.registerRun({ lineId: "base" });
+
+		reg.recordMetric(run.run_key, "weakness_total", 3.69, { stage: "eval" });
+		expect(() => reg.recordMetric(run.run_key, "weakness_total", 2.0)).toThrow(/不可覆盖/);
+
+		const revised = reg.recordMetric(run.run_key, "weakness_total", 2.0, { reviseReason: "分母算错" });
+		expect(revised.revision).toBe(2);
+		// 默认视图只看当前生效版本
+		const current = reg.listMetrics({ runKey: run.run_key });
+		expect(current.length).toBe(1);
+		expect(current[0].value).toBe(2.0);
+		// 历史完整保留
+		const history = reg.metricHistory(run.run_key, "weakness_total");
+		expect(history.length).toBe(2);
+		expect(history[0].value).toBe(3.69);
+		expect(history[0].superseded_by).toBe(revised.id);
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	test("circuit breaker: 3 consecutive failed runs pause the line", () => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-gov-"));
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("flaky");
+
+		reg.registerRun({ lineId: "flaky" });
+		reg.updateRun("flaky-001", { status: "failed", failClass: "infra_error" });
+		reg.registerRun({ lineId: "flaky" });
+		reg.updateRun("flaky-002", { status: "failed", failClass: "infra_error" });
+		expect(reg.getLine("flaky")?.status).toBe("active");
+
+		reg.registerRun({ lineId: "flaky" });
+		reg.updateRun("flaky-003", { status: "failed", failClass: "infra_error" });
+		expect(reg.getLine("flaky")?.status).toBe("paused");
+		expect(() => reg.registerRun({ lineId: "flaky" })).toThrow(/熔断/);
+
+		// 成功不计入失败：completed 重置计数
+		reg.resumeLine("flaky", "换回备用端点");
+		expect(reg.getLine("flaky")?.status).toBe("active");
+		const run = reg.registerRun({ lineId: "flaky" });
+		reg.recordMetric(run.run_key, "score", 1.0);
+		reg.updateRun(run.run_key, { status: "completed" });
+		expect(reg.getLine("flaky")?.consecutive_failures).toBe(0);
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	test("independent verification: rerun must match ledger metrics", async () => {
+		const { detectPython } = await import("../src/eval.ts");
+		const { verifyRun } = await import("../src/verify.ts");
+		try {
+			detectPython();
+		} catch {
+			return; // 环境无 Python 时跳过
+		}
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-gov-"));
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+		const script = join(tmp, "demo_eval.py");
+		writeFileSync(script, 'import json\nprint("RESULT_JSON: " + json.dumps({"mean_energy": 1.25}))\n', "utf-8");
+
+		// 一致：verified
+		reg.createLine("verify-ok");
+		const okRun = reg.registerRun({ lineId: "verify-ok" });
+		reg.recordMetric(okRun.run_key, "mean_energy", 1.25);
+		reg.setRunEvalSpec(okRun.run_key, { script, args: [], timeoutSec: 30 });
+		const ok = await verifyRun(reg, tmp, okRun.run_key);
+		expect(ok.status).toBe("verified");
+
+		// 不一致：mismatch（账本里是执行者自己填的 9.99，重跑只有 1.25）
+		reg.createLine("verify-bad");
+		const badRun = reg.registerRun({ lineId: "verify-bad" });
+		reg.recordMetric(badRun.run_key, "mean_energy", 9.99);
+		reg.setRunEvalSpec(badRun.run_key, { script, args: [], timeoutSec: 30 });
+		const bad = await verifyRun(reg, tmp, badRun.run_key);
+		expect(bad.status).toBe("mismatch");
+		expect(bad.comparisons[0].ok).toBe(false);
+		expect(reg.getRun(badRun.run_key)?.verification).toBe("mismatch");
+		reg.close();
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });

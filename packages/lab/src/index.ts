@@ -1,39 +1,48 @@
-export {
-	LabRegistry,
-	type ArtifactRow,
-	type ClaimInput,
-	type ClaimRow,
-	type WorkerRow,
-	type FailClass,
-	type LineRow,
-	type MetricInput,
-	type MetricRow,
-	type RunInput,
-	type RunRow,
-} from "./store.ts";
-export { experimentBrief, recallMetrics, type RecallFilter } from "./recall.ts";
+export { compareLines, compareScenarios, type LineComparison, type ScenarioComparison } from "./compare.ts";
+export { detectPython, type PythonRunResult, runPythonScript } from "./eval.ts";
 export { nowIso, shortHash, stableStringify } from "./fingerprint.ts";
 export {
-	ResilientLLM,
-	defaultAuditPath,
+	filterByDifficultyBand,
+	type PoolRow,
+	type PoolStats,
+	type PoolValidationReport,
+	poolStats,
+	validatePoolRows,
+} from "./pool.ts";
+export { experimentBrief, type RecallFilter, recallMetrics } from "./recall.ts";
+export {
 	type CallMessage,
 	type CallResult,
+	defaultAuditPath,
 	type EndpointConfig,
 	type EndpointsFile,
 	type LlmFailClass,
 	type ProbeResult,
 	type ResilientEndpoint,
+	ResilientLLM,
 	type ResilientOptions,
 } from "./resilient.ts";
-export { pairedTest, wilcoxonSignedRank, pairedTTest, type PairedTestResult } from "./stats.ts";
-export { compareLines, compareScenarios, type LineComparison, type ScenarioComparison } from "./compare.ts";
+export { type PairedTestResult, pairedTest, pairedTTest, wilcoxonSignedRank } from "./stats.ts";
 export {
-	validatePoolRows,
-	filterByDifficultyBand,
-	poolStats,
-	type PoolRow,
-	type PoolStats,
-	type PoolValidationReport,
-} from "./pool.ts";
-export { runPythonScript, detectPython, type PythonRunResult } from "./eval.ts";
-export { spawnLabWorker, collectLabWorker, workerStatusView, type SpawnWorkerOptions, type SpawnWorkerResult, type CollectedWorker } from "./worker.ts";
+	type ArtifactRow,
+	type ClaimInput,
+	type ClaimRow,
+	FAILURE_BREAKER_THRESHOLD,
+	type FailClass,
+	LabRegistry,
+	type LineRow,
+	type MetricInput,
+	type MetricRow,
+	type RunInput,
+	type RunRow,
+	type WorkerRow,
+} from "./store.ts";
+export { parseResultJson, type VerifyComparison, type VerifyResult, verifyRun } from "./verify.ts";
+export {
+	type CollectedWorker,
+	collectLabWorker,
+	type SpawnWorkerOptions,
+	type SpawnWorkerResult,
+	spawnLabWorker,
+	workerStatusView,
+} from "./worker.ts";

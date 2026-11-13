@@ -21,16 +21,21 @@ AI researchers don't lose experiments to weak models. They lose them to the chao
 
 These are not tooling gaps. They are **discipline gaps** — and discipline cannot be installed as a plugin. LabPi builds it into the agent loop itself.
 
-## The four mechanisms
+## The mechanisms
 
 | Mechanism | Where it lives | What it enforces |
 | --- | --- | --- |
 | **Experiment ledger** | `packages/lab` (new package, node:sqlite) | Five ledgers — lines, runs, metrics, artifacts, claims. Every run gets a directory with config fingerprint, logs and per-scenario results; every metric carries model, endpoint and measurement conditions |
 | **Completion gate** | `agent-session.ts` beforeToolCall, ahead of the extension runner | A run cannot be marked `completed` without recorded metrics. The model is blocked at the loop level and must either record evidence or honestly file a failure with a class |
 | **Evidence-linked claims** | ledger + comparison tools | Conclusions are registered with evidence references and optional direction assertions; every comparison auto-verifies direction and reports conflicts; a refuted claim loses its license to be cited as fact |
+| **Independent verification** | `lab_verify_run` + per-run eval spec | The evaluator re-runs the registered evaluation command and compares the script's own `RESULT_JSON` against the ledger. A mismatch blocks completion — the executor never signs off on its own numbers |
 | **Router/worker orchestration** | `lab_worker_spawn / status / collect` | One headless pi worker process per experiment direction, bound to one line, ledger writes locked to it (single-writer). The router spawns and collects, never executes; concurrency capped; blocked workers wait for the router |
 
 On top of these: resilient LLM calls with endpoint failover and three-way failure classification (infra / format / semantic — silence is not an option), exact Wilcoxon and paired-t statistics validated against reference values, task pools with measured difficulty metadata and bidirectional band filtering, Python evaluation scripts as subprocesses with hard timeouts.
+
+**Verification ladder.** Deterministic evidence first, judgement last: the evaluation script's own structured output → a structured comparison against the ledger (tolerance-bounded) → a paired significance test → a claim. Anything a machine can check is never handed to an LLM to judge, and the reported number is never trusted merely because the worker said so. A run backed by a script cannot be completed before `lab_verify_run` passes; a run without one can only complete as an explicitly declared `manual` evidence class, permanently stamped `unverified` in the ledger.
+
+**Governance over agent goodwill.** Ledger entries are append-only: correcting a metric demands a stated reason and keeps the old value as history. Three consecutive failed runs on one line trip the breaker and pause it until someone records what was investigated. The state card shows anomalies only — paused lines, failed verifications, workers awaiting collection, open claims — so normal operation stays in the background.
 
 ## What it looks like
 
@@ -64,7 +69,7 @@ npm run build
 
 Model endpoints are configured in `~/.pi/agent/models.json` (any OpenAI-compatible endpoint works, including vLLM). Evaluation scripts run via `lab_eval_run_python` — Python is auto-detected (`python` / `py` / `python3`).
 
-Everything pi can do, LabPi can do: file tools, session trees, compaction, forks, extensions, MCP — plus the four mechanisms above, which are part of the kernel, not plugins.
+Everything pi can do, LabPi can do: file tools, session trees, compaction, forks, extensions, MCP — plus the mechanisms above, which are part of the kernel, not plugins.
 
 ## Relationship to upstream
 

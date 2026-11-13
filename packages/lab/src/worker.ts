@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LabRegistry, WorkerRow } from "./store.ts";
@@ -51,6 +51,9 @@ export function spawnLabWorker(opts: SpawnWorkerOptions): SpawnWorkerResult {
 	if (!opts.registry.getLine(opts.lineId)) {
 		throw new Error(`实验线不存在: ${opts.lineId}`);
 	}
+	if (opts.registry.getLine(opts.lineId)?.status === "paused") {
+		throw new Error(`实验线「${opts.lineId}」已熔断暂停，不能派生 worker。先排查失败原因，再 lab_line_resume 恢复。`);
+	}
 
 	const { bin, args } = currentPiInvocation();
 	const workerPrompt = [
@@ -61,15 +64,11 @@ export function spawnLabWorker(opts: SpawnWorkerOptions): SpawnWorkerResult {
 		`最后输出一段简短总结（做了什么、指标是多少、结论）。`,
 	].join("\n");
 
-	const child: ChildProcess = spawn(
-		bin,
-		[...args, "--append-system-prompt", workerPrompt, "-p", opts.task],
-		{
-			cwd: opts.cwd,
-			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, LAB_LINE_ID: opts.lineId, LAB_NO_SPAWN: "1" },
-		},
-	);
+	const child: ChildProcess = spawn(bin, [...args, "--append-system-prompt", workerPrompt, "-p", opts.task], {
+		cwd: opts.cwd,
+		stdio: ["ignore", "pipe", "pipe"],
+		env: { ...process.env, LAB_LINE_ID: opts.lineId, LAB_NO_SPAWN: "1" },
+	});
 
 	const worker = opts.registry.addWorker(opts.lineId, opts.task, child.pid);
 	const logPath = join(runsDir(opts.cwd, opts.lineId), `w${worker.id}.log`);
@@ -78,8 +77,12 @@ export function spawnLabWorker(opts: SpawnWorkerOptions): SpawnWorkerResult {
 	let stdout = "";
 	let stderr = "";
 	let timedOut = false;
-	child.stdout?.on("data", (d) => (stdout += d.toString()));
-	child.stderr?.on("data", (d) => (stderr += d.toString()));
+	child.stdout?.on("data", (d) => {
+		stdout += d.toString();
+	});
+	child.stderr?.on("data", (d) => {
+		stderr += d.toString();
+	});
 
 	const timeoutMs = opts.timeoutMs ?? 3_600_000;
 	const timer = setTimeout(() => {
@@ -129,9 +132,7 @@ export interface CollectedWorker {
 export function collectLabWorker(registry: LabRegistry, workerId: number): CollectedWorker {
 	const worker = registry.getWorker(workerId);
 	if (!worker) throw new Error(`worker 不存在: W${workerId}`);
-	const runs = registry
-		.listRuns(worker.line_id)
-		.filter((r) => r.started_at >= worker.created_at);
+	const runs = registry.listRuns(worker.line_id).filter((r) => r.started_at >= worker.created_at);
 	const metrics = runs.flatMap((r) =>
 		registry.listMetrics({ runKey: r.run_key }).map((m) => ({
 			run_key: r.run_key,
@@ -140,9 +141,7 @@ export function collectLabWorker(registry: LabRegistry, workerId: number): Colle
 			context: m.context,
 		})),
 	);
-	const claims = registry
-		.listClaims({ lineId: worker.line_id })
-		.filter((c) => c.created_at >= worker.created_at);
+	const claims = registry.listClaims({ lineId: worker.line_id }).filter((c) => c.created_at >= worker.created_at);
 	return {
 		worker,
 		newRuns: runs.map((r) => ({ run_key: r.run_key, status: r.status, model: r.model })),

@@ -1,21 +1,22 @@
-import { Type, type Static, type TSchema } from "typebox";
 import { join } from "node:path";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
-	LabRegistry,
+	collectLabWorker,
 	compareLines,
 	compareScenarios,
 	experimentBrief,
 	filterByDifficultyBand,
+	LabRegistry,
 	poolStats,
 	recallMetrics,
 	runPythonScript,
 	spawnLabWorker,
 	validatePoolRows,
+	verifyRun,
 	workerStatusView,
-	collectLabWorker,
 } from "@earendil-works/pi-lab";
+import { type TSchema, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 
 /**
  * Built-in research-experiment tools: the lab ledger (experiment lines, runs, metrics,
@@ -42,6 +43,8 @@ export const LAB_TOOL_NAMES = [
 	"lab_pool_filter",
 	"lab_pool_stats",
 	"lab_eval_run_python",
+	"lab_verify_run",
+	"lab_line_resume",
 	"lab_worker_spawn",
 	"lab_worker_status",
 	"lab_worker_collect",
@@ -71,13 +74,7 @@ function defineTool<T extends TSchema>(def: LabToolDef<T>): LabToolDef<T> {
 	return def;
 }
 
-function claimConflicts(
-	reg: LabRegistry,
-	metric: string,
-	lineA: string,
-	lineB: string,
-	meanDiff: number,
-): string[] {
+function claimConflicts(reg: LabRegistry, metric: string, lineA: string, lineB: string, meanDiff: number): string[] {
 	const out: string[] = [];
 	for (const claim of reg.listClaims({ status: "open" })) {
 		if (!claim.check_json) continue;
@@ -89,11 +86,9 @@ function claimConflicts(
 		}
 		if (check.metric !== metric) continue;
 		const samePair =
-			(check.lineA === lineA && check.lineB === lineB) ||
-			(check.lineA === lineB && check.lineB === lineA);
+			(check.lineA === lineA && check.lineB === lineB) || (check.lineA === lineB && check.lineB === lineA);
 		if (!samePair || meanDiff === 0) continue;
-		const claimSaysABigger =
-			check.direction === "A>B" ? check.lineA === lineA : check.lineA === lineB;
+		const claimSaysABigger = check.direction === "A>B" ? check.lineA === lineA : check.lineA === lineB;
 		const diffSaysABigger = meanDiff > 0;
 		if (claimSaysABigger !== diffSaysABigger) {
 			out.push(
@@ -152,7 +147,15 @@ export function labBeforeToolCheck(
 	toolName: string,
 	args: unknown,
 ): { block: true; reason: string } | undefined {
-	const a = (args ?? {}) as { run_key?: string; status?: string; line_id?: string };
+	const a = (args ?? {}) as {
+		run_key?: string;
+		status?: string;
+		line_id?: string;
+		name?: string;
+		revise_reason?: string;
+		evidence_class?: string;
+		note?: string;
+	};
 	// 线绑定：worker 进程只能写自己绑定的实验线（单一写入者）
 	const boundLine = process.env.LAB_LINE_ID;
 	if (boundLine) {
@@ -169,10 +172,27 @@ export function labBeforeToolCheck(
 			};
 		}
 	}
+	// 熔断：连续失败的线暂停登记，必须显式恢复
+	if ((toolName === "lab_register_run" || toolName === "lab_worker_spawn") && a.line_id) {
+		const line = getLabRegistry(cwd).getLine(a.line_id);
+		if (line?.status === "paused") {
+			return {
+				block: true,
+				reason: `实验线「${a.line_id}」已熔断暂停（${line.paused_reason ?? "连续失败"}）。先排查失败原因，再用 lab_line_resume 显式恢复；绕过熔断继续跑只会重复烧时间。`,
+			};
+		}
+	}
 	if (toolName === "lab_update_run" && a.status === "completed" && a.run_key) {
 		const run = getLabRegistry(cwd).getRun(a.run_key);
 		if (!run) {
 			return { block: true, reason: `Run ${a.run_key} does not exist; cannot mark completed.` };
+		}
+		// 复核门：指标被独立复核证伪的 run 不能标完成
+		if (run.verification === "mismatch") {
+			return {
+				block: true,
+				reason: `Run ${a.run_key} 的指标未通过独立复核（${run.verification_note}）。「看起来对」不等于「真的对」——先修正或重新评测（lab_verify_run 重跑复核），账本里没有可信证据的 run 不能标完成。`,
+			};
 		}
 		const metrics = getLabRegistry(cwd).listMetrics({ runKey: a.run_key });
 		if (metrics.length === 0) {
@@ -180,6 +200,26 @@ export function labBeforeToolCheck(
 				block: true,
 				reason:
 					"Completion gate: this run has no recorded metrics, so it cannot be marked completed — conclusions must carry evidence. Record results first with lab_record_metric or lab_record_scenario_scores; if the experiment truly produced nothing, use status=failed with a fail_class and an explanation instead.",
+			};
+		}
+		// 验收阶梯：登记了复现命令的 run，未复核不得标完成（机器能验的环节先验）
+		if (run.eval_spec && run.verification !== "verified") {
+			return {
+				block: true,
+				reason: `Run ${a.run_key} 已登记评测复现命令，但尚未独立复核。先调用 lab_verify_run（重跑并与账本比对），通过后才能标完成；执行者不能自证。`,
+			};
+		}
+		// 手工证据：没有复现命令时必须显式声明来源，并且说明写在 note 里
+		if (!run.eval_spec && a.evidence_class !== "manual") {
+			return {
+				block: true,
+				reason: `Run ${a.run_key} 没有登记评测复现命令，无法独立复核。如果指标来自脚本，用 lab_eval_run_python 跑一次并 lab_verify_run；如果确实是手工分析（人工核对、离线推导、外部数据），用 evidence_class="manual" 并写明证据来源，该 run 会以 unverified 记录在账本里。`,
+			};
+		}
+		if (!run.eval_spec && a.evidence_class === "manual" && !a.note?.trim()) {
+			return {
+				block: true,
+				reason: "声明 evidence_class=manual 时必须在 note 里写明证据来源（哪个文件、哪次人工核对、什么外部数据），否则无来源指标会混进账本。",
 			};
 		}
 	}
@@ -193,43 +233,59 @@ export function labBeforeToolCheck(
 			reason: `Run ${a.run_key} does not exist. Register the experiment with lab_register_run first; results can only be recorded onto existing runs.`,
 		};
 	}
+	// 账本不可覆盖：同名指标重复写入必须给出修订理由
+	if (toolName === "lab_record_metric" && a.run_key && a.name && !a.revise_reason) {
+		const existing = getLabRegistry(cwd).listMetrics({ runKey: a.run_key, name: a.name });
+		if (existing.length > 0) {
+			return {
+				block: true,
+				reason: `指标 ${a.name} 已记录（值 ${existing[0].value}）。账本条目不可覆盖——如需更正请提供 revise_reason 说明原因，旧值将保留为历史版本。`,
+			};
+		}
+	}
 	return undefined;
 }
 
 /**
- * State card, injected before every LLM call via the transformContext chain:
- * current line, running runs, open claims. Regenerated each turn, so it survives
- * context compaction by construction. Returns undefined when the ledger is empty.
+ * State card, injected before every LLM call via the transformContext chain.
+ * Anomaly-first, in the same spirit as "人只处理异常": blocks that need a decision
+ * come first; healthy facts collapse into one quiet line. Regenerated each turn, so
+ * it survives context compaction by construction. Returns undefined on an empty ledger.
  */
 export function buildLabStateCard(cwd: string): string | undefined {
 	const reg = getLabRegistry(cwd);
 	const lines = reg.listLines();
 	if (lines.length === 0) return undefined;
+
 	const running = reg.listRuns().filter((r) => r.status === "running");
 	const open = reg.listClaims({ status: "open" });
-	const parts = [
-		"[Lab state card · injected by the harness every turn, no need to repeat it]",
-	];
-	const lastLine = lines.at(-1);
-	if (lastLine) parts.push(`Current line: ${lastLine.id} (${lines.length} lines total)`);
-	parts.push(
-		`Running runs: ${running.length ? running.map((r) => r.run_key).join(", ") : "none"}`,
-	);
-	parts.push(
-		open.length
-			? `Open claims (verify before citing; refuted ones must not be cited as fact): ${open
-					.map((cl) => `C${cl.id} ${cl.statement}`)
-					.join("; ")}`
-			: "Open claims: none",
-	);
 	const workers = reg.listWorkers();
 	const runningW = workers.filter((w) => w.status === "running");
 	const awaiting = workers.filter((w) => w.status !== "running");
+	const paused = lines.filter((l) => l.status === "paused");
+	const mismatched = reg.listRuns().filter((r) => r.verification === "mismatch");
+	const nearBreaker = lines.filter((l) => l.status !== "paused" && Number(l.consecutive_failures ?? 0) >= 2);
+
+	const attention: string[] = [];
+	for (const l of paused)
+		attention.push(`line ${l.id} 已熔断：${l.paused_reason ?? "连续失败"} → 排查后 lab_line_resume`);
+	for (const l of nearBreaker)
+		attention.push(`line ${l.id} 连续失败 ${Number(l.consecutive_failures)} 次（再失败即熔断）→ 先确认环境与端点`);
+	for (const r of mismatched)
+		attention.push(`run ${r.run_key} 指标未通过独立复核：${r.verification_note ?? ""} → 修正后 lab_verify_run`);
+	if (awaiting.length > 0)
+		attention.push(
+			`${awaiting.length} 个 worker 已结束待收取：${awaiting.map((w) => `W${w.id}`).join(", ")} → lab_worker_collect`,
+		);
+	for (const cl of open) attention.push(`未决判断 C${cl.id}：${cl.statement}（引用前先验证）`);
+
+	const parts = ["[Lab state card · injected by the harness every turn, no need to repeat it]"];
+	const lastLine = lines.at(-1);
+	if (lastLine) parts.push(`Current line: ${lastLine.id} (${lines.length} lines total)`);
+	parts.push(attention.length ? `Attention:\n${attention.map((x) => `- ${x}`).join("\n")}` : "Attention: none");
 	parts.push(
-		workers.length === 0
-			? "Workers: none"
-			: `Workers: ${runningW.length} running${runningW.length ? ` (${runningW.map((w) => `W${w.id}@${w.line_id}`).join(", ")})` : ""}` +
-				(awaiting.length ? `; ${awaiting.length} finished awaiting collect (${awaiting.map((w) => `W${w.id}`).join(", ")})` : ""),
+		`Background: ${running.length} running run(s)${running.length ? ` (${running.map((r) => r.run_key).join(", ")})` : ""}, ` +
+			`${runningW.length} running worker(s)${runningW.length ? ` (${runningW.map((w) => `W${w.id}@${w.line_id}`).join(", ")})` : ""}`,
 	);
 	return parts.join("\n");
 }
@@ -242,8 +298,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 		defineTool({
 			name: "lab_create_line",
 			label: "Create experiment line",
-			description:
-				"Create an experiment line (top-level container for a research thread). Runs belong to lines.",
+			description: "Create an experiment line (top-level container for a research thread). Runs belong to lines.",
 			parameters: Type.Object({
 				id: Type.String({ description: "Line id, slug form, e.g. baseline" }),
 				title: Type.Optional(Type.String()),
@@ -315,7 +370,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			name: "lab_update_run",
 			label: "Update run status",
 			description:
-				"Update run status. Failures must carry a fail_class: infra_error (endpoint/environment), format_violation (malformed output), semantic_fail (semantically wrong). Silent failures are forbidden.",
+				"Update run status. Failures must carry a fail_class: infra_error (endpoint/environment), format_violation (malformed output), semantic_fail (semantically wrong). Silent failures are forbidden. Completing a run requires evidence: script-backed runs must pass lab_verify_run first; manual runs must declare evidence_class=manual with a note naming the source.",
 			parameters: Type.Object({
 				run_key: Type.String(),
 				status: Type.Optional(
@@ -333,36 +388,67 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 						Type.Literal("semantic_fail"),
 					]),
 				),
+				evidence_class: Type.Optional(
+					Type.Union([Type.Literal("script_verified"), Type.Literal("manual")], {
+						description: "manual only when no reproducible script exists; note must name the evidence source",
+					}),
+				),
 				note: Type.Optional(Type.String()),
 			}),
 			async execute(_id, params) {
+				const before = reg().getRun(params.run_key);
 				const run = reg().updateRun(params.run_key, {
 					status: params.status,
 					failClass: params.fail_class,
 					note: params.note,
 				});
-				return json(run);
+				// 手工证据的 run 以 unverified 入账：允许完成，但账本永久标明没有脚本复核
+				if (
+					params.status === "completed" &&
+					params.evidence_class === "manual" &&
+					before &&
+					!before.eval_spec
+				) {
+					reg().setVerification(
+						params.run_key,
+						"unverified",
+						`手工证据（未独立复核）：${params.note ?? "未说明来源"}`,
+					);
+				}
+				return json(reg().getRun(params.run_key));
 			},
 		}),
 		defineTool({
 			name: "lab_record_metric",
 			label: "Record metric",
 			description:
-				"Record a metric value for a run with stage and measurement context. Metrics enter the experiment memory and carry endpoint/model conditions.",
+				"Record a metric value for a run with stage and measurement context. Metrics enter the experiment memory and carry endpoint/model conditions. Ledger entries are append-only: re-recording an existing metric requires revise_reason; the old value is kept as history.",
 			parameters: Type.Object({
 				run_key: Type.String(),
 				name: Type.String({ description: "Metric name, e.g. weakness_total" }),
 				value: Type.Number(),
 				stage: Type.Optional(Type.String()),
 				context: Type.Optional(Type.String({ description: "Units and measurement conditions" })),
+				revise_reason: Type.Optional(
+					Type.String({ description: "Required only when correcting an already-recorded metric" }),
+				),
 			}),
 			promptSnippet: "lab_record_metric: record an experiment metric into the ledger",
 			async execute(_id, params) {
 				const metric = reg().recordMetric(params.run_key, params.name, params.value, {
 					stage: params.stage,
 					context: params.context,
+					reviseReason: params.revise_reason,
 				});
-				return json(metric);
+				const history = reg().metricHistory(params.run_key, params.name);
+				return json({
+					metric,
+					revision: metric.revision ?? 1,
+					note:
+						history.length > 1
+							? `第 ${metric.revision} 版；历史版本共 ${history.length} 条（可 metricHistory 查询）`
+							: undefined,
+				});
 			},
 		}),
 		defineTool({
@@ -421,6 +507,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 				metric_name: Type.String({ description: "Aggregate metric name, e.g. weakness_total" }),
 				scores: Type.Array(Type.Object({ scenario_id: Type.String(), score: Type.Number() })),
 				context: Type.Optional(Type.String()),
+				revise_reason: Type.Optional(
+					Type.String({ description: "Required only when correcting an already-recorded aggregate metric" }),
+				),
 			}),
 			async execute(_id, params) {
 				reg().attachJsonArtifact(params.run_key, "results/per_scenario.json", params.scores);
@@ -429,6 +518,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 				const metric = reg().recordMetric(params.run_key, params.metric_name, mean, {
 					stage: "eval",
 					context: params.context,
+					reviseReason: params.revise_reason,
 				});
 				return json({ artifact: "results/per_scenario.json", n: values.length, metric });
 			},
@@ -586,13 +676,11 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			}),
 			async execute(_id, params) {
 				const { readFileSync, writeFileSync } = await import("node:fs");
-				const rows = JSON.parse(readFileSync(join(cwd, params.path), "utf-8")) as import("@earendil-works/pi-lab").PoolRow[];
+				const rows = JSON.parse(
+					readFileSync(join(cwd, params.path), "utf-8"),
+				) as import("@earendil-works/pi-lab").PoolRow[];
 				const kept = filterByDifficultyBand(rows, params.keep_min, params.keep_max);
-				writeFileSync(
-					join(cwd, params.out_path),
-					kept.map((r) => JSON.stringify(r)).join("\n") + "\n",
-					"utf-8",
-				);
+				writeFileSync(join(cwd, params.out_path), kept.map((r) => JSON.stringify(r)).join("\n") + "\n", "utf-8");
 				return json({ input: rows.length, kept: kept.length, out: params.out_path });
 			},
 		}),
@@ -617,6 +705,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 				script: Type.String({ description: "Python script path (relative to project root)" }),
 				args: Type.Optional(Type.Array(Type.String())),
 				timeout_sec: Type.Optional(Type.Number({ description: "Hard timeout seconds, default 1800" })),
+				tolerance: Type.Optional(
+					Type.Number({ description: "Tolerance for later lab_verify_run comparison; default 1e-6" }),
+				),
 			}),
 			async execute(_id, params) {
 				const result = await runPythonScript(params.script, params.args ?? [], {
@@ -625,12 +716,20 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 					cwd,
 				});
 				if (result.ok) {
+					// 登记复现命令：独立复核据此重跑，执行者不能自证
+					reg().setRunEvalSpec(params.run_key, {
+						script: params.script,
+						args: params.args ?? [],
+						timeoutSec: params.timeout_sec ?? 1800,
+						tolerance: params.tolerance,
+					});
 					reg().attachArtifact(params.run_key, result.logRelPath, "log");
 					return json({
 						ok: true,
 						exitCode: result.exitCode,
 						log: result.logRelPath,
 						stdoutTail: result.stdout.slice(-1500),
+						note: "评测命令已登记，可用 lab_verify_run 做独立复核（重跑并比对账本指标）。",
 					});
 				}
 				return json({
@@ -641,6 +740,38 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 					log: result.logRelPath,
 					stderrTail: result.stderr.slice(-500),
 				});
+			},
+		}),
+		defineTool({
+			name: "lab_verify_run",
+			label: "Independent verification",
+			description:
+				"Independent verification (the executor does not verify itself): re-run the run's registered evaluation command and compare the script's own RESULT_JSON output against the ledger metrics. Any mismatch marks the run as failed verification and blocks completion.",
+			parameters: Type.Object({
+				run_key: Type.String(),
+				tolerance: Type.Optional(
+					Type.Number({ description: "Absolute tolerance, default from eval spec or 1e-6" }),
+				),
+			}),
+			promptGuidelines: [
+				"Before citing a run's numbers as evidence, run lab_verify_run: the evaluator re-executes the script and compares against the ledger instead of trusting the reported values.",
+			],
+			async execute(_id, params) {
+				const result = await verifyRun(reg(), cwd, params.run_key, { tolerance: params.tolerance });
+				return json(result);
+			},
+		}),
+		defineTool({
+			name: "lab_line_resume",
+			label: "Resume paused line",
+			description:
+				"Resume a line that was paused by the failure breaker (3 consecutive failed runs). Requires an explicit reason: state what was investigated or fixed first.",
+			parameters: Type.Object({
+				line_id: Type.String(),
+				note: Type.String({ description: "What was investigated or fixed before resuming" }),
+			}),
+			async execute(_id, params) {
+				return json(reg().resumeLine(params.line_id, params.note));
 			},
 		}),
 		defineTool({
