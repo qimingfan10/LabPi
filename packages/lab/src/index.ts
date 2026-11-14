@@ -24,13 +24,16 @@ export {
 } from "./resilient.ts";
 export { type PairedTestResult, pairedTest, pairedTTest, wilcoxonSignedRank } from "./stats.ts";
 export {
+	type ActivityRow,
 	type ArtifactRow,
 	type ClaimInput,
 	type ClaimRow,
+	DEFAULT_LOCK_TTL_MS,
 	FAILURE_BREAKER_THRESHOLD,
 	type FailClass,
 	LabRegistry,
 	type LineRow,
+	type LockRow,
 	type MetricInput,
 	type MetricRow,
 	type RunInput,

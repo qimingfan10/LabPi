@@ -172,3 +172,71 @@ describe("lab governance", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });
+
+describe("lab lock & activity", () => {
+	test("line lock: conflict, re-entrancy, expiry steal, release", async () => {
+		const { sleep } = await import("../src/worker.ts");
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-lock-"));
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("lk");
+
+		// 本进程占线（默认持有者 pid:<pid>）
+		reg.acquireLineLock("lk");
+		// 他人持锁被拒
+		expect(() => reg.acquireLineLock("lk", { holder: "pid:999" })).toThrow(/占用/);
+		// 同持有者重入即续期
+		reg.acquireLineLock("lk");
+		// 换持有者需先释放；短租期过期后可被接管
+		reg.forceReleaseLineLock("lk", "测试切换持有者");
+		reg.acquireLineLock("lk", { holder: "stale", ttlMs: 1 });
+		await sleep(20);
+		const stolen = reg.acquireLineLock("lk", { holder: "pid:999" });
+		expect(stolen.holder).toBe("pid:999");
+		const acts = reg.listActivity({ lineId: "lk" });
+		expect(acts.some((a) => a.action === "lock.steal")).toBe(true);
+
+		// 强制释放
+		expect(reg.forceReleaseLineLock("lk", "确认 pid:999 已死")).toBe(true);
+		expect(reg.getLineLock("lk")).toBeUndefined();
+
+		// 有进行中的 run 时锁保持，run 终态后自动释放
+		reg.acquireLineLock("lk");
+		const run = reg.registerRun({ lineId: "lk" });
+		expect(reg.getLineLock("lk")).toBeDefined();
+		reg.updateRun(run.run_key, { status: "completed" });
+		expect(reg.getLineLock("lk")).toBeUndefined();
+
+		// 活动日志覆盖完整动作序列
+		const seq = reg.listActivity({ lineId: "lk" }).map((a) => a.action);
+		expect(seq).toContain("line.create");
+		expect(seq).toContain("lock.acquire");
+		expect(seq).toContain("run.register");
+		expect(seq).toContain("run.status");
+		expect(seq).toContain("lock.release");
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	test("activity log: metric revise and claim resolve are recorded", () => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-act-"));
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("act");
+		const run = reg.registerRun({ lineId: "act" });
+		reg.recordMetric(run.run_key, "score", 1.0);
+		reg.recordMetric(run.run_key, "score", 1.5, { reviseReason: "口径修正" });
+		const claim = reg.addClaim({ statement: "act 高于基线", lineId: "act" });
+		reg.resolveClaim(claim.id, "refuted", "实测反向");
+
+		const actions = reg.listActivity({ runKey: run.run_key }).map((a) => a.action);
+		expect(actions).toContain("metric.record");
+		expect(actions).toContain("metric.revise");
+		const revise = reg.listActivity({ action: "metric.revise" })[0];
+		expect(revise.detail).toContain("1→1.5");
+		const resolve = reg.listActivity({ action: "claim.resolve" })[0];
+		expect(resolve.detail).toContain("refuted");
+		// actor 区分角色
+		expect(reg.listActivity({})[0].actor).toMatch(/^router:pid/);
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+});

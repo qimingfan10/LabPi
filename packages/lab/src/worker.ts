@@ -2,6 +2,7 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LabRegistry, WorkerRow } from "./store.ts";
+import { DEFAULT_LOCK_TTL_MS } from "./store.ts";
 
 /**
  * Router/worker process orchestration, adapted from the dsh-superagent ideas:
@@ -70,6 +71,32 @@ export function spawnLabWorker(opts: SpawnWorkerOptions): SpawnWorkerResult {
 		env: { ...process.env, LAB_LINE_ID: opts.lineId, LAB_NO_SPAWN: "1" },
 	});
 
+	// 执行锁：以子进程身份占线（与 worker 内 lab_register_run 的默认持有者一致），同线双写被拒
+	if (child.pid === undefined) {
+		throw new Error("worker 进程启动失败（无 pid）");
+	}
+	try {
+		opts.registry.acquireLineLock(opts.lineId, { holder: `pid:${child.pid}` });
+	} catch (err) {
+		if (process.platform === "win32") {
+			spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+		} else {
+			child.kill("SIGKILL");
+		}
+		throw err;
+	}
+	// 锁心跳：worker 两次写账本之间可能隔一整个评测，router 侧定时续期
+	const lockRenew = setInterval(
+		() => {
+			try {
+				opts.registry.renewLineLock(opts.lineId, `pid:${child.pid}`);
+			} catch {
+				// 续期失败不中断 worker，锁过期后可被接管
+			}
+		},
+		Math.floor(DEFAULT_LOCK_TTL_MS / 3),
+	);
+
 	const worker = opts.registry.addWorker(opts.lineId, opts.task, child.pid);
 	const logPath = join(runsDir(opts.cwd, opts.lineId), `w${worker.id}.log`);
 	mkdirSync(join(runsDir(opts.cwd, opts.lineId)), { recursive: true });
@@ -98,10 +125,12 @@ export function spawnLabWorker(opts: SpawnWorkerOptions): SpawnWorkerResult {
 
 	child.on("error", (err) => {
 		clearTimeout(timer);
+		clearInterval(lockRenew);
 		opts.registry.finishWorker(worker.id, "failed", `spawn error: ${err.message}`, null);
 	});
 	child.on("close", (code) => {
 		clearTimeout(timer);
+		clearInterval(lockRenew);
 		writeFileSync(logPath, `# task: ${opts.task}\n${stdout}\n## STDERR\n${stderr}`, "utf-8");
 		const tail = stdout.trim().split("\n").slice(-40).join("\n");
 		const status = timedOut ? "failed" : code === 0 ? "reported" : "failed";
@@ -150,16 +179,34 @@ export function collectLabWorker(registry: LabRegistry, workerId: number): Colle
 	};
 }
 
-/** 路由视图：全部 worker 的状态一览 */
+/** 路由视图：全部 worker 的状态一览（含实验线执行锁） */
 export function workerStatusView(registry: LabRegistry): string {
 	const workers = registry.listWorkers();
-	if (workers.length === 0) return "(no workers)";
-	return workers
-		.map((w) => {
-			const report = w.report ? `  report: ${w.report.split("\n").at(-1)?.slice(0, 120)}` : "";
-			return `W${w.id} [${w.status}] line=${w.line_id} task=${w.task.slice(0, 60)}${report}`;
-		})
-		.join("\n");
+	const locks = registry.listLineLocks();
+	const parts: string[] = [];
+	if (locks.length > 0) {
+		parts.push(
+			locks
+				.map((l) => {
+					const heldSec = Math.round((Date.now() - Date.parse(l.renewed_at)) / 1000);
+					return `LOCK ${l.line_id} <- ${l.holder}（心跳 ${heldSec}s 前，租期 ${Math.round(l.ttl_ms / 60000)} 分钟）`;
+				})
+				.join("\n"),
+		);
+	}
+	if (workers.length === 0) {
+		parts.push("(no workers)");
+	} else {
+		parts.push(
+			workers
+				.map((w) => {
+					const report = w.report ? `  report: ${w.report.split("\n").at(-1)?.slice(0, 120)}` : "";
+					return `W${w.id} [${w.status}] line=${w.line_id} task=${w.task.slice(0, 60)}${report}`;
+				})
+				.join("\n"),
+		);
+	}
+	return parts.join("\n");
 }
 
 export { sleep };

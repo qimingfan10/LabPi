@@ -121,6 +121,32 @@ export type FailClass = "infra_error" | "format_violation" | "semantic_fail";
 /** 连续失败熔断阈值：同一线累计 3 次 failed 自动暂停 */
 export const FAILURE_BREAKER_THRESHOLD = 3;
 
+/** 执行锁默认租期：写入时自动续期，进程死亡后到期可被接管 */
+export const DEFAULT_LOCK_TTL_MS = 90 * 60_000;
+
+/** 执行锁：同一实验线同时只允许一个持有者写入 */
+export interface LockRow {
+	line_id: string;
+	holder: string;
+	pid?: number;
+	acquired_at: string;
+	renewed_at: string;
+	ttl_ms: number;
+}
+
+/** 活动日志：账本上每一次变更动作的统一留痕 */
+export interface ActivityRow {
+	id: number;
+	ts: string;
+	actor: string;
+	action: string;
+	line_id?: string;
+	run_key?: string;
+	claim_id?: number;
+	worker_id?: number;
+	detail?: string;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS lines (
   id TEXT PRIMARY KEY,
@@ -199,6 +225,27 @@ CREATE TABLE IF NOT EXISTS workers (
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_workers_line ON workers(line_id);
+CREATE TABLE IF NOT EXISTS line_locks (
+  line_id TEXT PRIMARY KEY REFERENCES lines(id),
+  holder TEXT NOT NULL,
+  pid INTEGER,
+  acquired_at TEXT NOT NULL,
+  renewed_at TEXT NOT NULL,
+  ttl_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  action TEXT NOT NULL,
+  line_id TEXT,
+  run_key TEXT,
+  claim_id INTEGER,
+  worker_id INTEGER,
+  detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_activity_line ON activity(line_id);
+CREATE INDEX IF NOT EXISTS idx_activity_run ON activity(run_key);
 `;
 
 export class LabRegistry {
@@ -246,6 +293,7 @@ export class LabRegistry {
          VALUES (?, ?, ?, ?, 'active', ?, ?)`,
 			)
 			.run(id, opts.title ?? null, opts.parentLine ?? null, opts.forkedFromRun ?? null, opts.note ?? null, nowIso());
+		this.act("line.create", { lineId: id }, opts.title ?? "");
 		return this.getLine(id)!;
 	}
 
@@ -268,6 +316,7 @@ export class LabRegistry {
 			throw new Error("fork 需要 lineId 或 runKey 之一");
 		}
 		const line = this.createLine(newId, { parentLine, forkedFromRun, note });
+		this.act("line.fork", { lineId: newId }, `from ${forkedFromRun ?? parentLine ?? ""}`);
 		let inheritedRuns = 0;
 		if (forkedFromRun !== undefined && parentLine !== undefined) {
 			const cnt = this.db
@@ -296,6 +345,8 @@ export class LabRegistry {
 				`实验线「${input.lineId}」已熔断暂停（${line.paused_reason ?? "连续失败"}）。先排查失败原因，再 lab_line_resume 显式恢复。`,
 			);
 		}
+		// 执行锁：同线只允许一个进程持有写入权；同进程重入即续期
+		this.acquireLineLock(input.lineId);
 		const seqRow = this.db
 			.prepare(`SELECT COUNT(*) AS n FROM runs WHERE line_id = ?`)
 			.get(input.lineId) as unknown as { n: number };
@@ -327,6 +378,11 @@ export class LabRegistry {
 		if (input.config !== undefined) {
 			this.attachJsonArtifact(runKey, "config.json", input.config, "config");
 		}
+		this.act(
+			"run.register",
+			{ lineId: input.lineId, runKey },
+			`stage=${input.stage ?? "-"} model=${input.model ?? "-"}`,
+		);
 		return this.getRun(runKey)!;
 	}
 
@@ -344,8 +400,14 @@ export class LabRegistry {
 				runKey,
 			);
 		if (patch.status && patch.status !== run.status) {
+			this.act(
+				"run.status",
+				{ lineId: run.line_id, runKey },
+				`${run.status}→${patch.status}${patch.failClass ? ` (${patch.failClass})` : ""}`,
+			);
 			if (patch.status === "failed") this.noteLineFailure(run.line_id, patch.failClass ?? null);
 			if (patch.status === "completed") this.resetLineFailures(run.line_id);
+			if (patch.status !== "running") this.maybeReleaseLineLock(run.line_id);
 		}
 		return this.getRun(runKey) as RunRow;
 	}
@@ -364,6 +426,7 @@ export class LabRegistry {
 				paused ? `连续 ${n} 次 failed（最近一次 ${failClass ?? "未分类"}）` : (line.paused_reason ?? null),
 				lineId,
 			);
+		if (paused) this.act("line.breaker", { lineId }, `连续 ${n} 次 failed，线暂停`);
 	}
 
 	private resetLineFailures(lineId: string): void {
@@ -378,6 +441,7 @@ export class LabRegistry {
 		this.db
 			.prepare(`UPDATE lines SET status = 'active', consecutive_failures = 0, paused_reason = ? WHERE id = ?`)
 			.run(note ? `resumed: ${note}` : null, lineId);
+		this.act("line.resume", { lineId }, note ?? "");
 		return this.getLine(lineId)!;
 	}
 
@@ -386,20 +450,20 @@ export class LabRegistry {
 		runKey: string,
 		spec: { script: string; args?: string[]; tolerance?: number; timeoutSec?: number },
 	): RunRow {
-		if (!this.getRun(runKey)) throw new Error(`run 不存在: ${runKey}`);
+		const run = this.getRun(runKey);
+		if (!run) throw new Error(`run 不存在: ${runKey}`);
 		this.db.prepare(`UPDATE runs SET eval_spec = ? WHERE run_key = ?`).run(JSON.stringify(spec), runKey);
+		this.act("run.eval_spec", { lineId: run.line_id, runKey }, spec.script);
 		return this.getRun(runKey)!;
 	}
 
-	setVerification(
-		runKey: string,
-		status: "verified" | "mismatch" | "unverified",
-		note: string,
-	): RunRow {
-		if (!this.getRun(runKey)) throw new Error(`run 不存在: ${runKey}`);
+	setVerification(runKey: string, status: "verified" | "mismatch" | "unverified", note: string): RunRow {
+		const run = this.getRun(runKey);
+		if (!run) throw new Error(`run 不存在: ${runKey}`);
 		this.db
 			.prepare(`UPDATE runs SET verification = ?, verification_note = ?, verified_at = ? WHERE run_key = ?`)
 			.run(status, note, nowIso(), runKey);
+		this.act("run.verify", { lineId: run.line_id, runKey }, `${status}: ${note}`);
 		return this.getRun(runKey)!;
 	}
 
@@ -447,6 +511,13 @@ export class LabRegistry {
 				);
 			const newId = Number(insert.lastInsertRowid);
 			this.db.prepare(`UPDATE metrics SET superseded_by = ? WHERE id = ?`).run(newId, latest.id);
+			const run = this.getRun(runKey);
+			if (run) this.touchLock(run.line_id);
+			this.act(
+				"metric.revise",
+				{ lineId: run?.line_id, runKey },
+				`${name}: ${latest.value}→${value}（r${Number(latest.revision ?? 1) + 1}，${opts.reviseReason}）`,
+			);
 			return this.getMetric(newId);
 		}
 		this.db
@@ -455,6 +526,9 @@ export class LabRegistry {
 		const row = this.db
 			.prepare(`SELECT * FROM metrics WHERE run_key = ? AND name = ? ORDER BY id DESC LIMIT 1`)
 			.get(runKey, name) as unknown as MetricRow;
+		const run = this.getRun(runKey);
+		if (run) this.touchLock(run.line_id);
+		this.act("metric.record", { lineId: run?.line_id, runKey }, `${name}=${value}`);
 		return row;
 	}
 
@@ -512,12 +586,15 @@ export class LabRegistry {
 	}
 
 	attachArtifact(runKey: string, relPath: string, kind = "other"): ArtifactRow {
-		if (!this.getRun(runKey)) throw new Error(`run 不存在: ${runKey}`);
+		const run = this.getRun(runKey);
+		if (!run) throw new Error(`run 不存在: ${runKey}`);
 		const abs = join(this.runDir(runKey), relPath);
 		const checksum = shortHash(readFileSync(abs).toString("base64"));
 		this.db
 			.prepare(`INSERT INTO artifacts (run_key, rel_path, kind, checksum, recorded_at) VALUES (?, ?, ?, ?, ?)`)
 			.run(runKey, relPath, kind, checksum, nowIso());
+		this.touchLock(run.line_id);
+		this.act("artifact.attach", { lineId: run.line_id, runKey }, `${relPath} (${kind})`);
 		return this.db
 			.prepare(`SELECT * FROM artifacts WHERE run_key = ? AND rel_path = ? ORDER BY id DESC LIMIT 1`)
 			.get(runKey, relPath) as unknown as ArtifactRow;
@@ -545,7 +622,9 @@ export class LabRegistry {
 				input.check ? JSON.stringify(input.check) : null,
 				nowIso(),
 			);
-		return this.db.prepare(`SELECT * FROM claims ORDER BY id DESC LIMIT 1`).get() as unknown as ClaimRow;
+		const claim = this.db.prepare(`SELECT * FROM claims ORDER BY id DESC LIMIT 1`).get() as unknown as ClaimRow;
+		this.act("claim.add", { lineId: input.lineId, claimId: claim.id }, input.statement.slice(0, 120));
+		return claim;
 	}
 
 	getClaim(id: number): ClaimRow | undefined {
@@ -573,6 +652,7 @@ export class LabRegistry {
 		this.db
 			.prepare(`UPDATE claims SET status = ?, verdict_note = ?, resolved_at = ? WHERE id = ?`)
 			.run(verdict, note ?? null, nowIso(), id);
+		this.act("claim.resolve", { lineId: claim.line_id, claimId: id }, `${verdict}: ${note ?? ""}`);
 		return this.getClaim(id)!;
 	}
 
@@ -583,7 +663,9 @@ export class LabRegistry {
 		this.db
 			.prepare(`INSERT INTO workers (line_id, task, status, pid, created_at) VALUES (?, ?, 'running', ?, ?)`)
 			.run(lineId, task, pid ?? null, nowIso());
-		return this.db.prepare(`SELECT * FROM workers ORDER BY id DESC LIMIT 1`).get() as unknown as WorkerRow;
+		const worker = this.db.prepare(`SELECT * FROM workers ORDER BY id DESC LIMIT 1`).get() as unknown as WorkerRow;
+		this.act("worker.spawn", { lineId, workerId: worker.id }, task.slice(0, 120));
+		return worker;
 	}
 
 	getWorker(id: number): WorkerRow | undefined {
@@ -613,9 +695,159 @@ export class LabRegistry {
 	}
 
 	finishWorker(id: number, status: "reported" | "failed", report: string, exitCode: number | null): WorkerRow {
+		const worker = this.getWorker(id);
 		this.db
 			.prepare(`UPDATE workers SET status = ?, report = ?, exit_code = ?, finished_at = ? WHERE id = ?`)
 			.run(status, report, exitCode, nowIso(), id);
+		if (worker) {
+			this.act("worker.finish", { lineId: worker.line_id, workerId: id }, `${status} exit=${exitCode}`);
+			this.maybeReleaseLineLock(worker.line_id);
+		}
 		return this.getWorker(id)!;
+	}
+
+	// ---------- 执行锁：同一实验线同时只允许一个进程写入 ----------
+
+	private actor(): string {
+		return `${process.env.LAB_LINE_ID ? "worker" : "router"}:pid${process.pid}`;
+	}
+
+	private act(
+		action: string,
+		refs: { lineId?: string; runKey?: string; claimId?: number; workerId?: number } = {},
+		detail?: string,
+	): void {
+		this.db
+			.prepare(
+				`INSERT INTO activity (ts, actor, action, line_id, run_key, claim_id, worker_id, detail)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				nowIso(),
+				this.actor(),
+				action,
+				refs.lineId ?? null,
+				refs.runKey ?? null,
+				refs.claimId ?? null,
+				refs.workerId ?? null,
+				detail ?? null,
+			);
+	}
+
+	getLineLock(lineId: string): LockRow | undefined {
+		return this.db.prepare(`SELECT * FROM line_locks WHERE line_id = ?`).get(lineId) as unknown as
+			| LockRow
+			| undefined;
+	}
+
+	listLineLocks(): LockRow[] {
+		return this.db.prepare(`SELECT * FROM line_locks ORDER BY acquired_at`).all() as unknown as LockRow[];
+	}
+
+	private static lockExpired(row: LockRow): boolean {
+		return Date.now() - Date.parse(row.renewed_at) > row.ttl_ms;
+	}
+
+	/** 占线：同持有者重入即续期；他人持锁且未过期则拒绝；过期锁自动接管 */
+	acquireLineLock(lineId: string, opts: { holder?: string; ttlMs?: number } = {}): LockRow {
+		if (!this.getLine(lineId)) throw new Error(`实验线不存在: ${lineId}`);
+		const holder = opts.holder ?? `pid:${process.pid}`;
+		const ttlMs = opts.ttlMs ?? DEFAULT_LOCK_TTL_MS;
+		const row = this.getLineLock(lineId);
+		if (row && row.holder !== holder && !LabRegistry.lockExpired(row)) {
+			const heldSec = Math.round((Date.now() - Date.parse(row.renewed_at)) / 1000);
+			throw new Error(
+				`实验线「${lineId}」正被 ${row.holder} 占用（心跳 ${heldSec}s 前，租期 ${Math.round(row.ttl_ms / 60000)} 分钟）。等待其结束；确认占用进程已死后用 forceReleaseLineLock 释放。`,
+			);
+		}
+		const now = nowIso();
+		if (row && row.holder === holder) {
+			this.db.prepare(`UPDATE line_locks SET renewed_at = ?, ttl_ms = ? WHERE line_id = ?`).run(now, ttlMs, lineId);
+		} else {
+			if (row) this.act("lock.steal", { lineId }, `旧持有者 ${row.holder} 心跳过期，由 ${holder} 接管`);
+			this.db
+				.prepare(
+					`INSERT INTO line_locks (line_id, holder, pid, acquired_at, renewed_at, ttl_ms) VALUES (?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(line_id) DO UPDATE SET holder = excluded.holder, pid = excluded.pid,
+					   acquired_at = excluded.acquired_at, renewed_at = excluded.renewed_at, ttl_ms = excluded.ttl_ms`,
+				)
+				.run(lineId, holder, process.pid, now, now, ttlMs);
+			this.act(row ? "lock.steal_done" : "lock.acquire", { lineId }, holder);
+		}
+		return this.getLineLock(lineId)!;
+	}
+
+	/** 写入时顺带续期：只续自己持有的锁，锁不存在则静默跳过 */
+	private touchLock(lineId: string): void {
+		this.db
+			.prepare(`UPDATE line_locks SET renewed_at = ? WHERE line_id = ? AND holder = ?`)
+			.run(nowIso(), lineId, `pid:${process.pid}`);
+	}
+
+	renewLineLock(lineId: string, holder: string): boolean {
+		const r = this.db
+			.prepare(`UPDATE line_locks SET renewed_at = ? WHERE line_id = ? AND holder = ?`)
+			.run(nowIso(), lineId, holder);
+		return Number(r.changes) > 0;
+	}
+
+	releaseLineLock(lineId: string, holder: string, note?: string): boolean {
+		const r = this.db.prepare(`DELETE FROM line_locks WHERE line_id = ? AND holder = ?`).run(lineId, holder);
+		if (Number(r.changes) > 0) {
+			this.act("lock.release", { lineId }, note ?? holder);
+			return true;
+		}
+		return false;
+	}
+
+	/** 强制释放：仅用于确认占用进程已死的场景，动作进活动日志 */
+	forceReleaseLineLock(lineId: string, note: string): boolean {
+		const row = this.getLineLock(lineId);
+		if (!row) return false;
+		this.db.prepare(`DELETE FROM line_locks WHERE line_id = ?`).run(lineId);
+		this.act("lock.force_release", { lineId }, `${row.holder} ${note}`);
+		return true;
+	}
+
+	/** 线上既无进行中的 run 也无进行中的 worker 时释放锁 */
+	maybeReleaseLineLock(lineId: string): boolean {
+		const lock = this.getLineLock(lineId);
+		if (!lock) return false;
+		const runs = this.db
+			.prepare(`SELECT COUNT(*) AS n FROM runs WHERE line_id = ? AND status = 'running'`)
+			.get(lineId) as unknown as { n: number };
+		const workers = this.db
+			.prepare(`SELECT COUNT(*) AS n FROM workers WHERE line_id = ? AND status = 'running'`)
+			.get(lineId) as unknown as { n: number };
+		if (Number(runs.n) > 0 || Number(workers.n) > 0) return false;
+		this.db.prepare(`DELETE FROM line_locks WHERE line_id = ?`).run(lineId);
+		this.act("lock.release", { lineId }, "线内无进行中的 run 与 worker");
+		return true;
+	}
+
+	// ---------- 活动日志 ----------
+
+	listActivity(filter: { lineId?: string; runKey?: string; action?: string; limit?: number } = {}): ActivityRow[] {
+		const conds: string[] = [];
+		const params: (string | number)[] = [];
+		if (filter.lineId) {
+			conds.push("line_id = ?");
+			params.push(filter.lineId);
+		}
+		if (filter.runKey) {
+			conds.push("run_key = ?");
+			params.push(filter.runKey);
+		}
+		if (filter.action) {
+			conds.push("action = ?");
+			params.push(filter.action);
+		}
+		const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+		const limit = Math.min(filter.limit ?? 50, 500);
+		params.push(limit);
+		const rows = this.db
+			.prepare(`SELECT * FROM activity ${where} ORDER BY id DESC LIMIT ?`)
+			.all(...params) as unknown as ActivityRow[];
+		return rows.reverse();
 	}
 }

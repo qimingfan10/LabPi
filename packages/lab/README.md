@@ -21,12 +21,14 @@ Research experiment discipline for pi: experiment ledger, evidence-linked claims
 2. **独立复核（选手不当裁判）**：`lab_eval_run_python` 执行成功即登记复现命令；`lab_verify_run` 用脚本重跑一遍，把重跑数值与账本指标比对。对不上落 `mismatch`，该 run 在复核通过前不能被标完成。没有复现命令的 run 要标完成，必须声明 `evidence_class="manual"` 并在 note 写明证据来源，账本以 `unverified` 永久标记——允许人工路径存在，但不允许它伪装成脚本证据。
 3. **账本不可覆盖**：同名指标重复写入必须提供 `revise_reason`，旧值保留为历史版本（`revision` + `superseded_by`），默认查询只看当前生效版本。
 4. **连续失败熔断**：同一实验线累计 3 次 failed 自动置为 `paused`，登记新 run 与派生 worker 均被拒绝，需 `lab_line_resume` 说明已排查什么才恢复。状态卡只报需要处理的事项（熔断线、复核不一致、待收取 worker、未决判断），正常状态折叠成一行。
+5. **执行锁**：同一实验线同时只允许一个进程写入。`registerRun` 自动占线（持有者为本进程 pid），同进程重入即续期；其他进程占线未过期时被拒，并给出持有者与心跳时间；进程死亡后租期（默认 90 分钟）到期可被接管。run 进入终态且线内无进行中 worker 时自动释放，也可 `forceReleaseLineLock` 人工清理。跨进程并行因此只能跨线，不能同线。
+6. **活动日志**：账本每次变更写一条 `activity`：创建/分叉线、登记 run、状态流转、指标记录与修订、工件挂载、判断增删与裁定、复核结论、worker 存亡、锁的获取/接管/释放、熔断触发。`lab_activity` 按线、run、动作类型查询，用于排障与写实验记录。
 
 ## 核心模块
 
 | 文件 | 职责 |
 | --- | --- |
-| store.ts | 实验账本：lines、runs、metrics、artifacts、claims、workers（node:sqlite） |
+| store.ts | 实验账本：lines、runs、metrics、artifacts、claims、workers、line_locks、activity（node:sqlite） |
 | recall.ts | 指标轨迹检索与实验线认知摘要 |
 | resilient.ts | 可靠 LLM 调用底座（探活回退、失败三分类、审计） |
 | stats.ts | Wilcoxon 符号秩（n≤16 精确枚举）、配对 t、胜平负 |

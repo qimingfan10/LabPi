@@ -45,6 +45,7 @@ export const LAB_TOOL_NAMES = [
 	"lab_eval_run_python",
 	"lab_verify_run",
 	"lab_line_resume",
+	"lab_activity",
 	"lab_worker_spawn",
 	"lab_worker_status",
 	"lab_worker_collect",
@@ -219,7 +220,8 @@ export function labBeforeToolCheck(
 		if (!run.eval_spec && a.evidence_class === "manual" && !a.note?.trim()) {
 			return {
 				block: true,
-				reason: "声明 evidence_class=manual 时必须在 note 里写明证据来源（哪个文件、哪次人工核对、什么外部数据），否则无来源指标会混进账本。",
+				reason:
+					"声明 evidence_class=manual 时必须在 note 里写明证据来源（哪个文件、哪次人工核对、什么外部数据），否则无来源指标会混进账本。",
 			};
 		}
 	}
@@ -403,12 +405,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 					note: params.note,
 				});
 				// 手工证据的 run 以 unverified 入账：允许完成，但账本永久标明没有脚本复核
-				if (
-					params.status === "completed" &&
-					params.evidence_class === "manual" &&
-					before &&
-					!before.eval_spec
-				) {
+				if (params.status === "completed" && params.evidence_class === "manual" && before && !before.eval_spec) {
 					reg().setVerification(
 						params.run_key,
 						"unverified",
@@ -772,6 +769,28 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			}),
 			async execute(_id, params) {
 				return json(reg().resumeLine(params.line_id, params.note));
+			},
+		}),
+		defineTool({
+			name: "lab_activity",
+			label: "Query activity log",
+			description:
+				"Unified audit trail of every ledger mutation: line/run/claim/worker changes, metric revisions, verifications, lock acquire/release and breaker trips, each with actor and timestamp. Use it to reconstruct what happened to a run or line.",
+			parameters: Type.Object({
+				line_id: Type.Optional(Type.String()),
+				run_key: Type.Optional(Type.String()),
+				action: Type.Optional(Type.String({ description: "Filter, e.g. run.status or metric.revise" })),
+				limit: Type.Optional(Type.Number({ description: "Default 50, max 500" })),
+			}),
+			async execute(_id, params) {
+				const rows = reg().listActivity({
+					lineId: params.line_id,
+					runKey: params.run_key,
+					action: params.action,
+					limit: params.limit,
+				});
+				if (rows.length === 0) return text("(no matching activity)");
+				return json(rows);
 			},
 		}),
 		defineTool({
