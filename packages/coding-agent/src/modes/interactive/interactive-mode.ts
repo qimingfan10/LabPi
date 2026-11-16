@@ -17,7 +17,6 @@ import {
 	type Model,
 	type Usage,
 } from "@earendil-works/pi-ai/compat";
-import { experimentBrief, recallMetrics, workerStatusView } from "@earendil-works/pi-lab";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -118,13 +117,14 @@ import type { FullscreenExitOutput, TuiMode } from "../../core/settings-manager.
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import { getSourcePackageKey, type SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
-import { getLabRegistry, labCommandClaims, labCommandLines, labCommandRuns } from "../../core/tools/lab.ts";
 import { withBuiltInRenderers } from "../../core/tools/renderers/index.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { getUsageCostBreakdown } from "../../core/usage-totals.ts";
 import { addMcpServerConfig, loadMcpConfig } from "../../extensions/mcp/config.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
+import { getLabRegistry, labCommandLines, labCommandRuns, labCommandClaims } from "../../core/tools/lab.ts";
+import { experimentBrief, recallMetrics, workerStatusView } from "@earendil-works/pi-lab";
 import { copyToClipboard, readClipboardFilePaths, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
 import { parseGitUrl } from "../../utils/git.ts";
@@ -3333,7 +3333,7 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (
+						if (
 				text === "/lines" ||
 				text === "/runs" ||
 				text.startsWith("/runs ") ||
@@ -3349,7 +3349,7 @@ export class InteractiveMode {
 				void this.handleLabCommand(text);
 				return;
 			}
-			if (text === "/fork") {
+if (text === "/fork") {
 				this.showUserMessageSelector();
 				this.editor.setText("");
 				return;
