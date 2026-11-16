@@ -240,3 +240,67 @@ describe("lab lock & activity", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });
+
+describe("lab snapshot & drift", () => {
+	test("snapshot copies script and records data/env/git fingerprints", async () => {
+		const { captureSnapshot, loadSnapshot, sha256File } = await import("../src/snapshot.ts");
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-snap-"));
+		const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+		writeFileSync(join(tmp, "demo_eval.py"), 'print("RESULT_JSON: {\\"m\\": 1}")\n', "utf-8");
+		writeFileSync(join(tmp, "data.csv"), "a,b\n1,2\n", "utf-8");
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("snap");
+		const run = reg.registerRun({ lineId: "snap" });
+		const runDir = join(tmp, "runs", run.run_key);
+
+		const m = captureSnapshot({ project: tmp, script: "demo_eval.py", runDir, dataPaths: ["data.csv"] });
+		expect(m.script.sha256).toBe(sha256File(join(tmp, "demo_eval.py")));
+		expect(m.data[0].sha256).toBe(sha256File(join(tmp, "data.csv")));
+		expect(require("node:fs").existsSync(join(runDir, m.script.copy))).toBe(true);
+		const loaded = loadSnapshot(runDir);
+		expect(loaded?.script.sha256).toBe(m.script.sha256);
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+
+	test("verify reports drift when the evaluation script changed", async () => {
+		const { detectPython } = await import("../src/eval.ts");
+		const { verifyRun } = await import("../src/verify.ts");
+		const { captureSnapshot } = await import("../src/snapshot.ts");
+		try {
+			detectPython();
+		} catch {
+			return;
+		}
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-drift-"));
+		const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+		const script = join(tmp, "eval.py");
+		writeFileSync(script, 'import json\nprint("RESULT_JSON: " + json.dumps({"mean_energy": 1.25}))\n', "utf-8");
+
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("drift");
+		const run = reg.registerRun({ lineId: "drift" });
+		const runDir = join(tmp, "runs", run.run_key);
+		reg.recordMetric(run.run_key, "mean_energy", 1.25);
+		reg.setRunEvalSpec(run.run_key, { script, args: [], timeoutSec: 30 });
+		const m = captureSnapshot({ project: tmp, script, runDir });
+		reg.setSnapshotMeta(run.run_key, m.script.sha256, m.captured_at);
+
+		const ok = await verifyRun(reg, tmp, run.run_key);
+		expect(ok.status).toBe("verified");
+
+		// 改动评测脚本 → 复核必须报漂移，而不是把差异算成数据造假
+		writeFileSync(script, 'import json\nprint("RESULT_JSON: " + json.dumps({"mean_energy": 2.5}))\n', "utf-8");
+		const drifted = await verifyRun(reg, tmp, run.run_key);
+		expect(drifted.status).toBe("drift");
+		expect(reg.getRun(run.run_key)?.verification).toBe("drift");
+		expect(reg.listActivity({ runKey: run.run_key }).some((a) => a.action === "run.drift")).toBe(true);
+
+		// 恢复原脚本 → 重新复核通过
+		writeFileSync(script, 'import json\nprint("RESULT_JSON: " + json.dumps({"mean_energy": 1.25}))\n', "utf-8");
+		const again = await verifyRun(reg, tmp, run.run_key);
+		expect(again.status).toBe("verified");
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+});

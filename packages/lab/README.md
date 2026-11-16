@@ -23,6 +23,7 @@ Research experiment discipline for pi: experiment ledger, evidence-linked claims
 4. **连续失败熔断**：同一实验线累计 3 次 failed 自动置为 `paused`，登记新 run 与派生 worker 均被拒绝，需 `lab_line_resume` 说明已排查什么才恢复。状态卡只报需要处理的事项（熔断线、复核不一致、待收取 worker、未决判断），正常状态折叠成一行。
 5. **执行锁**：同一实验线同时只允许一个进程写入。`registerRun` 自动占线（持有者为本进程 pid），同进程重入即续期；其他进程占线未过期时被拒，并给出持有者与心跳时间；进程死亡后租期（默认 90 分钟）到期可被接管。run 进入终态且线内无进行中 worker 时自动释放，也可 `forceReleaseLineLock` 人工清理。跨进程并行因此只能跨线，不能同线。
 6. **活动日志**：账本每次变更写一条 `activity`：创建/分叉线、登记 run、状态流转、指标记录与修订、工件挂载、判断增删与裁定、复核结论、worker 存亡、锁的获取/接管/释放、熔断触发。`lab_activity` 按线、run、动作类型查询，用于排障与写实验记录。
+7. **输入快照与漂移检测**：`lab_eval_run_python` 成功即把评测脚本复制到 `runs/<run_key>/snapshot/src/`，并记录脚本 sha256、数据文件哈希、Python 环境指纹（解释器 + pip freeze 哈希）与 git 状态（commit + 未提交改动），清单写入 `snapshot/manifest.json`。复核前先比对当前脚本哈希与登记值：不一致落 `drift`（代码已漂移，重跑不可比），而不是误判为数据造假；哈希一致时优先用快照副本重跑。漂移的 run 不能标完成，状态卡与 collect 均会提示。
 
 ## 核心模块
 
@@ -35,5 +36,6 @@ Research experiment discipline for pi: experiment ledger, evidence-linked claims
 | compare.ts | 实验线与逐场景配对对比，含未决判断方向核对 |
 | pool.ts | 任务池校验、难度带双向筛选、分布统计 |
 | eval.ts | Python 评测脚本编排（独立子进程、硬超时、解释器探测） |
-| verify.ts | 独立复核：重跑评测命令，重跑结果与账本指标逐项比对 |
+| verify.ts | 独立复核：重跑评测命令，重跑结果与账本指标逐项比对；漂移检测优先于数值比对 |
+| snapshot.ts | 输入快照：脚本副本、数据/环境/git 指纹清单，供回溯与漂移判定 |
 | worker.ts | router/worker 进程编排 |

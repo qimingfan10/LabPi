@@ -22,6 +22,16 @@ export {
 	ResilientLLM,
 	type ResilientOptions,
 } from "./resilient.ts";
+export {
+	type CaptureOptions,
+	captureSnapshot,
+	currentScriptHash,
+	loadSnapshot,
+	type SnapshotFile,
+	type SnapshotManifest,
+	sha256File,
+	snapshotScriptPath,
+} from "./snapshot.ts";
 export { type PairedTestResult, pairedTest, pairedTTest, wilcoxonSignedRank } from "./stats.ts";
 export {
 	type ActivityRow,

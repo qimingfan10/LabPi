@@ -34,6 +34,10 @@ export interface RunRow {
 	verification?: string;
 	verification_note?: string;
 	verified_at?: string;
+	/** 评测脚本内容哈希（快照时记录），用于漂移检测 */
+	script_hash?: string;
+	/** 输入快照采集时间 */
+	snapshot_at?: string;
 	started_at: string;
 	finished_at?: string;
 }
@@ -175,6 +179,8 @@ CREATE TABLE IF NOT EXISTS runs (
   verification TEXT,
   verification_note TEXT,
   verified_at TEXT,
+  script_hash TEXT,
+  snapshot_at TEXT,
   started_at TEXT NOT NULL,
   finished_at TEXT
 );
@@ -273,6 +279,8 @@ export class LabRegistry {
 		add("runs", "verification", "verification TEXT");
 		add("runs", "verification_note", "verification_note TEXT");
 		add("runs", "verified_at", "verified_at TEXT");
+		add("runs", "script_hash", "script_hash TEXT");
+		add("runs", "snapshot_at", "snapshot_at TEXT");
 		add("metrics", "revision", "revision INTEGER NOT NULL DEFAULT 1");
 		add("metrics", "superseded_by", "superseded_by INTEGER");
 		add("metrics", "revise_reason", "revise_reason TEXT");
@@ -457,13 +465,23 @@ export class LabRegistry {
 		return this.getRun(runKey)!;
 	}
 
-	setVerification(runKey: string, status: "verified" | "mismatch" | "unverified", note: string): RunRow {
+	setSnapshotMeta(runKey: string, scriptHash: string, snapshotAt: string): RunRow {
+		const run = this.getRun(runKey);
+		if (!run) throw new Error(`run 不存在: ${runKey}`);
+		this.db
+			.prepare(`UPDATE runs SET script_hash = ?, snapshot_at = ? WHERE run_key = ?`)
+			.run(scriptHash, snapshotAt, runKey);
+		this.act("run.snapshot", { lineId: run.line_id, runKey }, `script_hash=${scriptHash.slice(0, 12)}`);
+		return this.getRun(runKey)!;
+	}
+
+	setVerification(runKey: string, status: "verified" | "mismatch" | "unverified" | "drift", note: string): RunRow {
 		const run = this.getRun(runKey);
 		if (!run) throw new Error(`run 不存在: ${runKey}`);
 		this.db
 			.prepare(`UPDATE runs SET verification = ?, verification_note = ?, verified_at = ? WHERE run_key = ?`)
 			.run(status, note, nowIso(), runKey);
-		this.act("run.verify", { lineId: run.line_id, runKey }, `${status}: ${note}`);
+		this.act(status === "drift" ? "run.drift" : "run.verify", { lineId: run.line_id, runKey }, `${status}: ${note}`);
 		return this.getRun(runKey)!;
 	}
 

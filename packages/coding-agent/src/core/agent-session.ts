@@ -148,7 +148,7 @@ import {
 } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
-import { buildLabStateCard, createLabToolDefinitions, labBeforeToolCheck, LAB_TOOL_NAMES } from "./tools/lab.ts";
+import { buildLabStateCard, createLabToolDefinitions, LAB_TOOL_NAMES, labBeforeToolCheck } from "./tools/lab.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, combineUsage, createUsageTotals } from "./usage-totals.ts";
 import {
@@ -3725,9 +3725,7 @@ export class AgentSession {
 						read: { autoResizeImages },
 						bash: { commandPrefix: shellCommandPrefix, shellPath },
 					}),
-					...Object.fromEntries(
-						createLabToolDefinitions(this._cwd).map((def) => [def.name, def]),
-					),
+					...Object.fromEntries(createLabToolDefinitions(this._cwd).map((def) => [def.name, def])),
 				};
 
 		this._baseToolDefinitions = new Map(

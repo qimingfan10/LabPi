@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { runPythonScript } from "./eval.ts";
+import { currentScriptHash, loadSnapshot, snapshotScriptPath } from "./snapshot.ts";
 import type { LabRegistry } from "./store.ts";
 
 /**
@@ -17,7 +18,7 @@ export interface VerifyComparison {
 }
 
 export interface VerifyResult {
-	status: "verified" | "mismatch";
+	status: "verified" | "mismatch" | "drift";
 	comparisons: VerifyComparison[];
 	/** 重跑输出里有、但账本没登记的指标（提醒，不算失败） */
 	unrecorded: string[];
@@ -58,7 +59,26 @@ export async function verifyRun(
 	};
 	const tolerance = opts.tolerance ?? spec.tolerance ?? 1e-6;
 
-	const rerun = await runPythonScript(spec.script, spec.args ?? [], {
+	// 漂移检测：工作区里的脚本已不是登记时那一版，重跑结果不可比
+	if (run.script_hash) {
+		const manifest = loadSnapshot(join(registry.runsRoot, runKey));
+		const current = currentScriptHash(cwd, spec.script);
+		if (!current) {
+			const note = `代码漂移：评测脚本 ${spec.script} 已不存在，无法确认与登记时一致。快照仍保留在 runs/${runKey}/snapshot/，可在该目录下用快照副本重跑。`;
+			registry.setVerification(runKey, "drift", note);
+			return { status: "drift", comparisons: [], unrecorded: [], rerunLog: "", note };
+		}
+		if (current !== run.script_hash) {
+			const note = `代码漂移：${spec.script} 的内容与登记时不同（当时 ${run.script_hash.slice(0, 12)}，现在 ${current.slice(0, 12)}），重跑不可比。先确认要复核哪一版：用快照副本 runs/${runKey}/${manifest?.script.copy ?? "snapshot/src/"} 重跑，或恢复脚本后重试。`;
+			registry.setVerification(runKey, "drift", note);
+			return { status: "drift", comparisons: [], unrecorded: [], rerunLog: "", note };
+		}
+	}
+	// 优先用快照副本执行：即使工作区文件在运行中被改写，复核跑的还是登记时那一版
+	const snapshotScript = snapshotScriptPath(join(registry.runsRoot, runKey));
+	const scriptToRun = snapshotScript ?? spec.script;
+
+	const rerun = await runPythonScript(scriptToRun, spec.args ?? [], {
 		timeoutMs: (spec.timeoutSec ?? 1800) * 1000,
 		logDir: join(registry.runsRoot, runKey, "verify"),
 		cwd,

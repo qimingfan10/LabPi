@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
+	captureSnapshot,
 	collectLabWorker,
 	compareLines,
 	compareScenarios,
@@ -195,6 +196,13 @@ export function labBeforeToolCheck(
 				reason: `Run ${a.run_key} 的指标未通过独立复核（${run.verification_note}）。「看起来对」不等于「真的对」——先修正或重新评测（lab_verify_run 重跑复核），账本里没有可信证据的 run 不能标完成。`,
 			};
 		}
+		// 漂移闸：评测代码已不是登记时那一版，复核不可比
+		if (run.verification === "drift") {
+			return {
+				block: true,
+				reason: `Run ${a.run_key} 的评测代码已漂移（${run.verification_note}）。快照副本在 runs/${a.run_key}/snapshot/，先用它确认当时的行为，或恢复脚本后再 lab_verify_run；代码漂移时完成标记会把不可比的结果固化成可信数据。`,
+			};
+		}
 		const metrics = getLabRegistry(cwd).listMetrics({ runKey: a.run_key });
 		if (metrics.length === 0) {
 			return {
@@ -266,6 +274,7 @@ export function buildLabStateCard(cwd: string): string | undefined {
 	const awaiting = workers.filter((w) => w.status !== "running");
 	const paused = lines.filter((l) => l.status === "paused");
 	const mismatched = reg.listRuns().filter((r) => r.verification === "mismatch");
+	const drifting = reg.listRuns().filter((r) => r.verification === "drift");
 	const nearBreaker = lines.filter((l) => l.status !== "paused" && Number(l.consecutive_failures ?? 0) >= 2);
 
 	const attention: string[] = [];
@@ -275,6 +284,10 @@ export function buildLabStateCard(cwd: string): string | undefined {
 		attention.push(`line ${l.id} 连续失败 ${Number(l.consecutive_failures)} 次（再失败即熔断）→ 先确认环境与端点`);
 	for (const r of mismatched)
 		attention.push(`run ${r.run_key} 指标未通过独立复核：${r.verification_note ?? ""} → 修正后 lab_verify_run`);
+	for (const r of drifting)
+		attention.push(
+			`run ${r.run_key} 评测代码已漂移：${r.verification_note ?? ""} → 用 snapshot/ 副本确认，或恢复脚本后复核`,
+		);
 	if (awaiting.length > 0)
 		attention.push(
 			`${awaiting.length} 个 worker 已结束待收取：${awaiting.map((w) => `W${w.id}`).join(", ")} → lab_worker_collect`,
@@ -696,7 +709,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			name: "lab_eval_run_python",
 			label: "Run evaluation script",
 			description:
-				"Run a Python evaluation script as a separate process with a hard timeout; stdout is archived under the run's logs/. Timeouts and crashes are classified infra_error.",
+				"Run a Python evaluation script as a separate process with a hard timeout; stdout is archived under the run's logs/. On success the script is copied into the run's snapshot/ with data, environment and git fingerprints, so later code edits can be told apart from real results. Timeouts and crashes are classified infra_error.",
 			parameters: Type.Object({
 				run_key: Type.String(),
 				script: Type.String({ description: "Python script path (relative to project root)" }),
@@ -704,6 +717,11 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 				timeout_sec: Type.Optional(Type.Number({ description: "Hard timeout seconds, default 1800" })),
 				tolerance: Type.Optional(
 					Type.Number({ description: "Tolerance for later lab_verify_run comparison; default 1e-6" }),
+				),
+				data_paths: Type.Optional(
+					Type.Array(Type.String(), {
+						description: "Data files the script reads; hashed into the snapshot so later swaps are detectable",
+					}),
 				),
 			}),
 			async execute(_id, params) {
@@ -720,13 +738,39 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 						timeoutSec: params.timeout_sec ?? 1800,
 						tolerance: params.tolerance,
 					});
+					// 输入快照：脚本副本 + 数据/环境/git 指纹，供日后回溯与漂移检测
+					let snapshotInfo: { script_hash: string; captured_at: string; path: string } | undefined;
+					try {
+						const manifest = captureSnapshot({
+							project: cwd,
+							script: params.script,
+							runDir: join(runsDir(), params.run_key),
+							dataPaths: params.data_paths,
+						});
+						reg().setSnapshotMeta(params.run_key, manifest.script.sha256, manifest.captured_at);
+						reg().attachArtifact(params.run_key, "snapshot/manifest.json", "snapshot");
+						snapshotInfo = {
+							script_hash: manifest.script.sha256.slice(0, 12),
+							captured_at: manifest.captured_at,
+							path: `snapshot/${manifest.script.copy}`,
+						};
+					} catch (err) {
+						// 快照失败不阻断实验，但必须显式记录
+						reg().attachJsonArtifact(
+							params.run_key,
+							"snapshot/error.json",
+							{ error: (err as Error).message, at: new Date().toISOString() },
+							"snapshot",
+						);
+					}
 					reg().attachArtifact(params.run_key, result.logRelPath, "log");
 					return json({
 						ok: true,
 						exitCode: result.exitCode,
 						log: result.logRelPath,
 						stdoutTail: result.stdout.slice(-1500),
-						note: "评测命令已登记，可用 lab_verify_run 做独立复核（重跑并比对账本指标）。",
+						snapshot: snapshotInfo,
+						note: "评测命令已登记，脚本已快照；可用 lab_verify_run 做独立复核（用快照副本重跑并比对账本指标）。",
 					});
 				}
 				return json({
