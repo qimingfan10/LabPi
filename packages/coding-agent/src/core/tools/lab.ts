@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	captureSnapshot,
@@ -56,7 +56,8 @@ let registry: LabRegistry | undefined;
 
 export function getLabRegistry(cwd: string): LabRegistry {
 	if (!registry) {
-		const runsRoot = join(cwd, "runs");
+		// worktree 模式：worker 的 cwd 是隔离工作区，账本仍归主项目（LAB_RUNS_ROOT 指向主项目 runs/）
+		const runsRoot = process.env.LAB_RUNS_ROOT ? resolve(process.env.LAB_RUNS_ROOT) : join(cwd, "runs");
 		registry = new LabRegistry({ dbPath: join(runsRoot, "lab.db"), runsRoot });
 	}
 	return registry;
@@ -841,11 +842,13 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			name: "lab_worker_spawn",
 			label: "Spawn direction worker",
 			description:
-				"Spawn a headless pi worker process bound to one experiment line to execute one direction autonomously (own session, own directory, ledger writes locked to that line). The router spawns and collects; it does not execute. Concurrency is capped.",
+				"Spawn a headless pi worker process bound to one experiment line to execute one direction autonomously (own session, own directory, ledger writes locked to that line). The router spawns and collects; it does not execute. No built-in concurrency cap: parallel lines are bounded by machine and gateway capacity, not by the harness.",
 			parameters: Type.Object({
 				line_id: Type.String({ description: "Experiment line the worker is bound to" }),
 				task: Type.String({ description: "Direction task: what the worker should try and record" }),
-				max_workers: Type.Optional(Type.Number({ description: "Concurrency cap, default 3" })),
+				max_workers: Type.Optional(
+					Type.Number({ description: "Optional caller-side cap; omitted means unlimited" }),
+				),
 				timeout_min: Type.Optional(Type.Number({ description: "Hard timeout minutes, default 60" })),
 			}),
 			promptGuidelines: [

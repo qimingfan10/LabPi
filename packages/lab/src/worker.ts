@@ -7,9 +7,9 @@ import { DEFAULT_LOCK_TTL_MS } from "./store.ts";
 /**
  * Router/worker process orchestration, adapted from the dsh-superagent ideas:
  * one worker process per direction, bound to one experiment line and one headless
- * pi session; the router only spawns and collects, never executes; concurrent
- * workers are capped (WorkerSlots); a worker that needs a human decision ends
- * blocked/failed and waits for the router.
+ * pi session; the router only spawns and collects, never executes; concurrency has
+ * no built-in cap (the caller may pass maxWorkers to throttle); a worker that needs
+ * a human decision ends blocked/failed and waits for the router.
  */
 
 export interface SpawnWorkerOptions {
@@ -42,12 +42,14 @@ export function spawnLabWorker(opts: SpawnWorkerOptions): SpawnWorkerResult {
 	if (process.env.LAB_NO_SPAWN === "1") {
 		throw new Error("worker 进程内禁止再派生 worker（LAB_NO_SPAWN=1），避免进程树失控");
 	}
-	const max = opts.maxWorkers ?? 3;
-	const running = opts.registry.countRunningWorkers();
-	if (running >= max) {
-		throw new Error(
-			`活跃 worker 已达上限（${running}/${max}）。先 lab_worker_collect 收取已完成的 worker，或调高 maxWorkers。`,
-		);
+	// 并发线数没有内建上限：由机器与网关的承载能力决定，调用方需要限流时显式传 maxWorkers
+	if (opts.maxWorkers !== undefined) {
+		const running = opts.registry.countRunningWorkers();
+		if (running >= opts.maxWorkers) {
+			throw new Error(
+				`活跃 worker 已达调用方设定的上限（${running}/${opts.maxWorkers}）。先 lab_worker_collect 收取已完成的 worker，或调高 maxWorkers。`,
+			);
+		}
 	}
 	if (!opts.registry.getLine(opts.lineId)) {
 		throw new Error(`实验线不存在: ${opts.lineId}`);
