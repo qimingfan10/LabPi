@@ -304,3 +304,25 @@ describe("lab snapshot & drift", () => {
 		rmSync(tmp, { recursive: true, force: true });
 	});
 });
+
+describe("stale lock takeover", () => {
+	test("registerRun steals an expired lock without manual cleanup", () => {
+		const tmp = mkdtempSync(join(tmpdir(), "pi-lab-stale-"));
+		const reg = new LabRegistry({ dbPath: join(tmp, "lab.db"), runsRoot: join(tmp, "runs") });
+		reg.createLine("stale");
+		// 模拟一个死亡进程留下的过期锁
+		reg.acquireLineLock("stale", { holder: "pid:99999", ttlMs: 60_000 });
+		// 把心跳拨回两小时前，等价于持锁进程两天前死亡
+		reg.db
+			.prepare("UPDATE line_locks SET renewed_at = ? WHERE line_id = 'stale'")
+			.run(new Date(Date.now() - 7_200_000).toISOString());
+		// 新进程登记 run：应自动接管，而不是报占用
+		const run = reg.registerRun({ lineId: "stale" });
+		expect(run.run_key).toBe("stale-001");
+		expect(reg.getLineLock("stale")?.holder).toBe(`pid:${process.pid}`);
+		const acts = reg.listActivity({ lineId: "stale" }).map((a) => a.action);
+		expect(acts).toContain("lock.steal");
+		reg.close();
+		rmSync(tmp, { recursive: true, force: true });
+	});
+});
