@@ -20,6 +20,8 @@ export interface RunRow {
 	run_key: string;
 	line_id: string;
 	title?: string;
+	/** 绑定的研究假设（H-0001 形式）；方向层据此聚合证据 */
+	hypothesis_id?: string;
 	stage?: string;
 	model?: string;
 	endpoint?: string;
@@ -103,6 +105,133 @@ export interface WorkerRow {
 	finished_at?: string;
 }
 
+/** 研究假设：方向层的一等对象。proposed（已提议）→ queued（已过闸门可派发）
+ *  → running（派发中）→ supported|refuted|killed（终态）；stale 表示证据条件已失效 */
+export interface HypothesisRow {
+	id: string;
+	line_id?: string;
+	parent_run?: string;
+	parent_hypothesis?: string;
+	statement: string;
+	/** 若假设成立，哪个指标变化多少 */
+	prediction: string;
+	/** 哪个观测结果能区分此假设与备择解释 */
+	discriminator: string;
+	prior: number;
+	expected_gain?: number;
+	eval_ref?: string;
+	anchor_ref?: string;
+	held_out_spec?: string;
+	budget_cap?: number;
+	kill_after?: number;
+	/** claim_conflict | residual | cross_line | saturation | human */
+	provenance: string;
+	provenance_ref?: string;
+	status: string;
+	rank_score?: number;
+	/** 排序分量 JSON，供事后核对打分依据 */
+	rank_components?: string;
+	decided_run?: string;
+	decision_note?: string;
+	created_at: string;
+	decided_at?: string;
+}
+
+export interface HypothesisInput {
+	statement: string;
+	prediction: string;
+	discriminator: string;
+	prior?: number;
+	expectedGain?: number;
+	lineId?: string;
+	parentRun?: string;
+	parentHypothesis?: string;
+	evalRef?: string;
+	anchorRef?: string;
+	heldOutSpec?: string;
+	budgetCap?: number;
+	killAfter?: number;
+	provenance: string;
+	provenanceRef?: string;
+}
+
+/** 新颖性检查：检索证据入账，verdict 由会话内模型判定后写入 */
+export interface NoveltyCheckRow {
+	id: number;
+	hypothesis_id: string;
+	query: string;
+	/** 检索来源与候选 JSON */
+	sources?: string;
+	/** novel | adjacent | duplicate | insufficient */
+	verdict: string;
+	/** 证据论文列表 JSON */
+	evidence_ids?: string;
+	checked_by?: string;
+	checked_at: string;
+}
+
+/** 提问闸门产生的问题：只问会改变下一步动作的问题，附默认答案 */
+export interface QuestionRow {
+	id: number;
+	hypothesis_id?: string;
+	brief_ref?: string;
+	field: string;
+	question: string;
+	default_answer?: string;
+	answer?: string;
+	/** open | answered | defaulted */
+	status: string;
+	asked_at: string;
+	resolved_at?: string;
+}
+
+/** 评测器：某条线的评测脚本及其质量度量（噪声底、审计漏检率） */
+export interface EvaluatorRow {
+	id: string;
+	line_id?: string;
+	script_path?: string;
+	script_hash?: string;
+	metric_names?: string;
+	/** JSON：每个指标的 {n, mean, sd}，来自同配置重复 run 实测 */
+	noise_floor?: string;
+	anchor_id?: string;
+	audit_miss_rate?: number;
+	last_audit_at?: string;
+}
+
+/** 派发记录：一个 dispatch 或 review 角色会话在进度表上的一行 */
+export interface DispatchRow {
+	id: number;
+	line_id?: string;
+	hypothesis_id?: string;
+	session?: string;
+	stage: string;
+	/** 显式声明的父阶段：阶段间的上下文分叉关系以此为准 */
+	parent_stage?: string;
+	goal?: string;
+	pid?: number;
+	/** running | completed | failed | gate_blocked | gateway_unreachable | stale */
+	status: string;
+	exit_code?: number;
+	summary?: string;
+	log_path?: string;
+	started_at: string;
+	finished_at?: string;
+}
+
+/** 锚：改进信号所依附的、模型改不动的对象 */
+export interface AnchorRow {
+	id: string;
+	/** held_out_split | hidden_scenarios | fixed_budget | external_verifier | human_rubric | sealed_env */
+	kind: string;
+	/** strong | medium | weak */
+	strength: string;
+	definition_path?: string;
+	/** JSON：{git?, net?, hiddenTests?} 封闭等级 */
+	sealing_level?: string;
+	note?: string;
+}
+
 export interface RunInput {
 	lineId: string;
 	title?: string;
@@ -111,6 +240,8 @@ export interface RunInput {
 	endpoint?: string;
 	config?: unknown;
 	note?: string;
+	/** 绑定研究假设：dispatch --hypothesis 派发的 run 必须携带 */
+	hypothesisId?: string;
 }
 
 export interface MetricInput {
@@ -127,6 +258,17 @@ export const FAILURE_BREAKER_THRESHOLD = 3;
 
 /** 执行锁默认租期：写入时自动续期，进程死亡后到期可被接管 */
 export const DEFAULT_LOCK_TTL_MS = 90 * 60_000;
+
+/** 假设状态机：合法迁移边；terminal 态不支持再迁移 */
+export const HYPOTHESIS_TRANSITIONS: Record<string, string[]> = {
+	proposed: ["queued", "killed", "stale"],
+	queued: ["running", "proposed", "killed", "stale"],
+	running: ["supported", "refuted", "killed", "queued", "stale"],
+	supported: [],
+	refuted: [],
+	killed: [],
+	stale: ["queued", "proposed", "killed"],
+};
 
 /** 执行锁：同一实验线同时只允许一个持有者写入 */
 export interface LockRow {
@@ -252,6 +394,95 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 CREATE INDEX IF NOT EXISTS idx_activity_line ON activity(line_id);
 CREATE INDEX IF NOT EXISTS idx_activity_run ON activity(run_key);
+CREATE TABLE IF NOT EXISTS hypotheses (
+  id TEXT PRIMARY KEY,
+  line_id TEXT,
+  parent_run TEXT,
+  parent_hypothesis TEXT,
+  statement TEXT NOT NULL,
+  prediction TEXT NOT NULL,
+  discriminator TEXT NOT NULL,
+  prior REAL NOT NULL DEFAULT 0.5,
+  expected_gain REAL,
+  eval_ref TEXT,
+  anchor_ref TEXT,
+  held_out_spec TEXT,
+  budget_cap REAL,
+  kill_after INTEGER NOT NULL DEFAULT 3,
+  provenance TEXT NOT NULL,
+  provenance_ref TEXT,
+  status TEXT NOT NULL DEFAULT 'proposed',
+  rank_score REAL,
+  rank_components TEXT,
+  decided_run TEXT,
+  decision_note TEXT,
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_hypotheses_line ON hypotheses(line_id);
+CREATE INDEX IF NOT EXISTS idx_hypotheses_status ON hypotheses(status);
+CREATE TABLE IF NOT EXISTS novelty_checks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hypothesis_id TEXT NOT NULL REFERENCES hypotheses(id),
+  query TEXT NOT NULL,
+  sources TEXT,
+  verdict TEXT NOT NULL,
+  evidence_ids TEXT,
+  checked_by TEXT,
+  checked_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_novelty_hypothesis ON novelty_checks(hypothesis_id);
+CREATE TABLE IF NOT EXISTS questions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  hypothesis_id TEXT,
+  brief_ref TEXT,
+  field TEXT NOT NULL,
+  question TEXT NOT NULL,
+  default_answer TEXT,
+  answer TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  asked_at TEXT NOT NULL,
+  resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_questions_hypothesis ON questions(hypothesis_id);
+CREATE TABLE IF NOT EXISTS evaluators (
+  id TEXT PRIMARY KEY,
+  line_id TEXT,
+  script_path TEXT,
+  script_hash TEXT,
+  metric_names TEXT,
+  noise_floor TEXT,
+  anchor_id TEXT,
+  audit_miss_rate REAL,
+  last_audit_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_evaluators_line ON evaluators(line_id);
+CREATE TABLE IF NOT EXISTS anchors (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  strength TEXT NOT NULL,
+  definition_path TEXT,
+  sealing_level TEXT,
+  note TEXT
+);
+CREATE TABLE IF NOT EXISTS dispatches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  line_id TEXT,
+  hypothesis_id TEXT,
+  session TEXT,
+  stage TEXT NOT NULL,
+  parent_stage TEXT,
+  goal TEXT,
+  pid INTEGER,
+  status TEXT NOT NULL DEFAULT 'running',
+  exit_code INTEGER,
+  summary TEXT,
+  log_path TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_dispatches_stage ON dispatches(stage);
+CREATE INDEX IF NOT EXISTS idx_dispatches_status ON dispatches(status);
 `;
 
 export class LabRegistry {
@@ -263,6 +494,8 @@ export class LabRegistry {
 		this.runsRoot = opts.runsRoot;
 		this.db = new DatabaseSync(opts.dbPath);
 		this.db.exec("PRAGMA journal_mode = WAL;");
+		// 多角色评审等场景下多个 router 进程并发写账本：写锁竞争时等待而不是报 BUSY
+		this.db.exec("PRAGMA busy_timeout = 10000;");
 		this.db.exec(SCHEMA);
 		this.migrate();
 	}
@@ -284,6 +517,8 @@ export class LabRegistry {
 		add("metrics", "revision", "revision INTEGER NOT NULL DEFAULT 1");
 		add("metrics", "superseded_by", "superseded_by INTEGER");
 		add("metrics", "revise_reason", "revise_reason TEXT");
+		add("runs", "hypothesis_id", "hypothesis_id TEXT");
+		add("dispatches", "parent_stage", "parent_stage TEXT");
 	}
 
 	close(): void {
@@ -353,6 +588,13 @@ export class LabRegistry {
 				`实验线「${input.lineId}」已熔断暂停（${line.paused_reason ?? "连续失败"}）。先排查失败原因，再 lab_line_resume 显式恢复。`,
 			);
 		}
+		if (input.hypothesisId) {
+			const hyp = this.getHypothesis(input.hypothesisId);
+			if (!hyp) throw new Error(`假设不存在: ${input.hypothesisId}`);
+			if (hyp.status !== "queued" && hyp.status !== "running") {
+				throw new Error(`假设 ${input.hypothesisId} 状态为 ${hyp.status}，只有 queued 或 running 的假设可登记 run`);
+			}
+		}
 		// 执行锁：同线只允许一个进程持有写入权；同进程重入即续期
 		this.acquireLineLock(input.lineId);
 		const seqRow = this.db
@@ -365,8 +607,8 @@ export class LabRegistry {
 		this.db
 			.prepare(
 				`INSERT INTO runs (run_key, line_id, title, stage, model, endpoint, endpoint_fingerprint,
-                           config_fingerprint, status, note, started_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+                           config_fingerprint, status, note, hypothesis_id, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)`,
 			)
 			.run(
 				runKey,
@@ -378,6 +620,7 @@ export class LabRegistry {
 				endpointFp,
 				configFp,
 				input.note ?? null,
+				input.hypothesisId ?? null,
 				nowIso(),
 			);
 		mkdirSync(this.runDir(runKey), { recursive: true });
@@ -672,6 +915,437 @@ export class LabRegistry {
 			.run(verdict, note ?? null, nowIso(), id);
 		this.act("claim.resolve", { lineId: claim.line_id, claimId: id }, `${verdict}: ${note ?? ""}`);
 		return this.getClaim(id)!;
+	}
+
+	// ---------- 方向层：假设账本 ----------
+
+	private nextSeqId(prefix: string, table: string, width: number): string {
+		const row = this.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as unknown as { n: number };
+		return `${prefix}-${String(Number(row.n) + 1).padStart(width, "0")}`;
+	}
+
+	addHypothesis(input: HypothesisInput): HypothesisRow {
+		if (!input.statement?.trim()) throw new Error("假设陈述不能为空");
+		if (!input.prediction?.trim()) throw new Error("假设必须给出预测（若成立，哪个指标变化多少）");
+		if (!input.discriminator?.trim()) throw new Error("假设必须给出判别条件（哪个观测能区分此假设与备择解释）");
+		if (!input.provenance?.trim()) throw new Error("假设必须注明来源（claim_conflict|residual|cross_line|saturation|human）");
+		const id = this.nextSeqId("H", "hypotheses", 4);
+		this.db
+			.prepare(
+				`INSERT INTO hypotheses (id, line_id, parent_run, parent_hypothesis, statement, prediction, discriminator,
+				   prior, expected_gain, eval_ref, anchor_ref, held_out_spec, budget_cap, kill_after,
+				   provenance, provenance_ref, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)`,
+			)
+			.run(
+				id,
+				input.lineId ?? null,
+				input.parentRun ?? null,
+				input.parentHypothesis ?? null,
+				input.statement,
+				input.prediction,
+				input.discriminator,
+				input.prior ?? 0.5,
+				input.expectedGain ?? null,
+				input.evalRef ?? null,
+				input.anchorRef ?? null,
+				input.heldOutSpec ?? null,
+				input.budgetCap ?? null,
+				input.killAfter ?? 3,
+				input.provenance,
+				input.provenanceRef ?? null,
+				nowIso(),
+			);
+		this.act("hypothesis.create", { lineId: input.lineId }, `${id} ${input.statement.slice(0, 100)}`);
+		return this.getHypothesis(id)!;
+	}
+
+	getHypothesis(id: string): HypothesisRow | undefined {
+		return this.db.prepare(`SELECT * FROM hypotheses WHERE id = ?`).get(id) as unknown as HypothesisRow | undefined;
+	}
+
+	listHypotheses(
+		filter: { lineId?: string; status?: string; limit?: number } = {},
+	): HypothesisRow[] {
+		const conds: string[] = [];
+		const params: (string | number)[] = [];
+		if (filter.lineId) {
+			conds.push("line_id = ?");
+			params.push(filter.lineId);
+		}
+		if (filter.status) {
+			conds.push("status = ?");
+			params.push(filter.status);
+		}
+		const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+		const limit = Math.min(filter.limit ?? 200, 1000);
+		params.push(limit);
+		return this.db
+			.prepare(`SELECT * FROM hypotheses ${where} ORDER BY rank_score DESC, created_at LIMIT ?`)
+			.all(...params) as unknown as HypothesisRow[];
+	}
+
+	/** 状态迁移：只允许假设状态机定义的边，非法迁移直接报错 */
+	updateHypothesis(
+		id: string,
+		patch: {
+			status?: string;
+			lineId?: string | null;
+			evalRef?: string | null;
+			anchorRef?: string | null;
+			heldOutSpec?: string | null;
+			budgetCap?: number | null;
+			killAfter?: number;
+			expectedGain?: number | null;
+			decisionNote?: string;
+		},
+	): HypothesisRow {
+		const hyp = this.getHypothesis(id);
+		if (!hyp) throw new Error(`假设不存在: ${id}`);
+		if (patch.status && patch.status !== hyp.status) {
+			const allowed = HYPOTHESIS_TRANSITIONS[hyp.status] ?? [];
+			if (!allowed.includes(patch.status)) {
+				throw new Error(`假设状态迁移非法: ${hyp.status}→${patch.status}（允许: ${allowed.join(", ") || "无"}）`);
+			}
+		}
+		const next = {
+			status: patch.status ?? hyp.status,
+			line_id: patch.lineId === undefined ? hyp.line_id : patch.lineId,
+			eval_ref: patch.evalRef === undefined ? hyp.eval_ref : patch.evalRef,
+			anchor_ref: patch.anchorRef === undefined ? hyp.anchor_ref : patch.anchorRef,
+			held_out_spec: patch.heldOutSpec === undefined ? hyp.held_out_spec : patch.heldOutSpec,
+			budget_cap: patch.budgetCap === undefined ? hyp.budget_cap : patch.budgetCap,
+			kill_after: patch.killAfter ?? hyp.kill_after,
+			expected_gain: patch.expectedGain === undefined ? hyp.expected_gain : patch.expectedGain,
+			decision_note: patch.decisionNote ?? hyp.decision_note,
+		};
+		this.db
+			.prepare(
+				`UPDATE hypotheses SET status = ?, line_id = ?, eval_ref = ?, anchor_ref = ?, held_out_spec = ?,
+				   budget_cap = ?, kill_after = ?, expected_gain = ?, decision_note = ? WHERE id = ?`,
+			)
+			.run(
+				next.status,
+				next.line_id ?? null,
+				next.eval_ref ?? null,
+				next.anchor_ref ?? null,
+				next.held_out_spec ?? null,
+				next.budget_cap ?? null,
+				next.kill_after ?? 3,
+				next.expected_gain ?? null,
+				next.decision_note ?? null,
+				id,
+			);
+		if (patch.status && patch.status !== hyp.status) {
+			this.act("hypothesis.status", { lineId: hyp.line_id ?? undefined }, `${id} ${hyp.status}→${patch.status}`);
+		}
+		return this.getHypothesis(id)!;
+	}
+
+	setHypothesisRank(id: string, score: number, components: unknown): HypothesisRow {
+		const hyp = this.getHypothesis(id);
+		if (!hyp) throw new Error(`假设不存在: ${id}`);
+		this.db
+			.prepare(`UPDATE hypotheses SET rank_score = ?, rank_components = ? WHERE id = ?`)
+			.run(score, JSON.stringify(components), id);
+		return this.getHypothesis(id)!;
+	}
+
+	/** 判定假设：supported 必须附已验证的 run，证据一并入账 */
+	decideHypothesis(
+		id: string,
+		decision: "supported" | "refuted" | "killed",
+		opts: { runKey?: string; note?: string } = {},
+	): HypothesisRow {
+		const hyp = this.getHypothesis(id);
+		if (!hyp) throw new Error(`假设不存在: ${id}`);
+		const allowed = HYPOTHESIS_TRANSITIONS[hyp.status] ?? [];
+		if (!allowed.includes(decision)) {
+			throw new Error(`假设状态迁移非法: ${hyp.status}→${decision}（允许: ${allowed.join(", ") || "无"}）`);
+		}
+		if (decision === "supported") {
+			if (!opts.runKey) throw new Error("supported 必须给出支撑该判断的 run_key");
+			const run = this.getRun(opts.runKey);
+			if (!run) throw new Error(`run 不存在: ${opts.runKey}`);
+			if (run.verification !== "verified") {
+				throw new Error(`run ${opts.runKey} 的复核状态为 ${run.verification ?? "未复核"}，不能作为支撑证据`);
+			}
+		}
+		this.db
+			.prepare(`UPDATE hypotheses SET status = ?, decided_run = ?, decision_note = ?, decided_at = ? WHERE id = ?`)
+			.run(decision, opts.runKey ?? null, opts.note ?? null, nowIso(), id);
+		this.act(
+			"hypothesis.decide",
+			{ lineId: hyp.line_id ?? undefined, runKey: opts.runKey },
+			`${id} ${decision}${opts.note ? `: ${opts.note}` : ""}`,
+		);
+		return this.getHypothesis(id)!;
+	}
+
+	// ---------- 方向层：新颖性检查 ----------
+
+	addNoveltyCheck(input: {
+		hypothesisId: string;
+		query: string;
+		sources?: unknown;
+		verdict: "novel" | "adjacent" | "duplicate" | "insufficient";
+		evidenceIds?: unknown;
+		checkedBy?: string;
+	}): NoveltyCheckRow {
+		if (!this.getHypothesis(input.hypothesisId)) throw new Error(`假设不存在: ${input.hypothesisId}`);
+		this.db
+			.prepare(
+				`INSERT INTO novelty_checks (hypothesis_id, query, sources, verdict, evidence_ids, checked_by, checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				input.hypothesisId,
+				input.query,
+				input.sources === undefined ? null : JSON.stringify(input.sources),
+				input.verdict,
+				input.evidenceIds === undefined ? null : JSON.stringify(input.evidenceIds),
+				input.checkedBy ?? null,
+				nowIso(),
+			);
+		const row = this.db
+			.prepare(`SELECT * FROM novelty_checks ORDER BY id DESC LIMIT 1`)
+			.get() as unknown as NoveltyCheckRow;
+		this.act("novelty.check", {}, `${input.hypothesisId} ${input.verdict} (${input.query.slice(0, 80)})`);
+		return row;
+	}
+
+	listNoveltyChecks(hypothesisId: string): NoveltyCheckRow[] {
+		return this.db
+			.prepare(`SELECT * FROM novelty_checks WHERE hypothesis_id = ? ORDER BY id DESC`)
+			.all(hypothesisId) as unknown as NoveltyCheckRow[];
+	}
+
+	latestNoveltyCheck(hypothesisId: string): NoveltyCheckRow | undefined {
+		return this.db
+			.prepare(`SELECT * FROM novelty_checks WHERE hypothesis_id = ? ORDER BY id DESC LIMIT 1`)
+			.get(hypothesisId) as unknown as NoveltyCheckRow | undefined;
+	}
+
+	// ---------- 方向层：提问闸门 ----------
+
+	addQuestion(input: {
+		hypothesisId?: string;
+		briefRef?: string;
+		field: string;
+		question: string;
+		defaultAnswer?: string;
+	}): QuestionRow {
+		this.db
+			.prepare(
+				`INSERT INTO questions (hypothesis_id, brief_ref, field, question, default_answer, status, asked_at)
+         VALUES (?, ?, ?, ?, ?, 'open', ?)`,
+			)
+			.run(
+				input.hypothesisId ?? null,
+				input.briefRef ?? null,
+				input.field,
+				input.question,
+				input.defaultAnswer ?? null,
+				nowIso(),
+			);
+		const row = this.db.prepare(`SELECT * FROM questions ORDER BY id DESC LIMIT 1`).get() as unknown as QuestionRow;
+		this.act("question.ask", {}, `${input.field}: ${input.question.slice(0, 100)}`);
+		return row;
+	}
+
+	answerQuestion(id: number, answer: string, defaulted = false): QuestionRow {
+		const q = this.db.prepare(`SELECT * FROM questions WHERE id = ?`).get(id) as unknown as QuestionRow | undefined;
+		if (!q) throw new Error(`问题不存在: Q${id}`);
+		this.db
+			.prepare(`UPDATE questions SET answer = ?, status = ?, resolved_at = ? WHERE id = ?`)
+			.run(answer, defaulted ? "defaulted" : "answered", nowIso(), id);
+		this.act("question.answer", {}, `Q${id} ${defaulted ? "defaulted" : "answered"}: ${answer.slice(0, 100)}`);
+		return this.db.prepare(`SELECT * FROM questions WHERE id = ?`).get(id) as unknown as QuestionRow;
+	}
+
+	listQuestions(filter: { hypothesisId?: string; status?: string; limit?: number } = {}): QuestionRow[] {
+		const conds: string[] = [];
+		const params: (string | number)[] = [];
+		if (filter.hypothesisId) {
+			conds.push("hypothesis_id = ?");
+			params.push(filter.hypothesisId);
+		}
+		if (filter.status) {
+			conds.push("status = ?");
+			params.push(filter.status);
+		}
+		const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+		const limit = Math.min(filter.limit ?? 100, 500);
+		params.push(limit);
+		return this.db
+			.prepare(`SELECT * FROM questions ${where} ORDER BY id DESC LIMIT ?`)
+			.all(...params) as unknown as QuestionRow[];
+	}
+
+	// ---------- 方向层：评测器与锚 ----------
+
+	addEvaluator(input: {
+		id?: string;
+		lineId?: string;
+		scriptPath?: string;
+		scriptHash?: string;
+		metricNames?: unknown;
+		anchorId?: string;
+	}): EvaluatorRow {
+		const id = input.id ?? this.nextSeqId("EV", "evaluators", 4);
+		if (this.getEvaluator(id)) throw new Error(`评测器已存在: ${id}`);
+		this.db
+			.prepare(
+				`INSERT INTO evaluators (id, line_id, script_path, script_hash, metric_names, anchor_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				id,
+				input.lineId ?? null,
+				input.scriptPath ?? null,
+				input.scriptHash ?? null,
+				input.metricNames === undefined ? null : JSON.stringify(input.metricNames),
+				input.anchorId ?? null,
+			);
+		this.act("evaluator.register", { lineId: input.lineId }, id);
+		return this.getEvaluator(id)!;
+	}
+
+	getEvaluator(id: string): EvaluatorRow | undefined {
+		return this.db.prepare(`SELECT * FROM evaluators WHERE id = ?`).get(id) as unknown as EvaluatorRow | undefined;
+	}
+
+	listEvaluators(filter: { lineId?: string } = {}): EvaluatorRow[] {
+		if (filter.lineId) {
+			return this.db
+				.prepare(`SELECT * FROM evaluators WHERE line_id = ? ORDER BY id`)
+				.all(filter.lineId) as unknown as EvaluatorRow[];
+		}
+		return this.db.prepare(`SELECT * FROM evaluators ORDER BY id`).all() as unknown as EvaluatorRow[];
+	}
+
+	updateEvaluatorAudit(id: string, patch: { noiseFloor?: unknown; missRate?: number }): EvaluatorRow {
+		const ev = this.getEvaluator(id);
+		if (!ev) throw new Error(`评测器不存在: ${id}`);
+		this.db
+			.prepare(`UPDATE evaluators SET noise_floor = ?, audit_miss_rate = ?, last_audit_at = ? WHERE id = ?`)
+			.run(
+				patch.noiseFloor === undefined ? (ev.noise_floor ?? null) : JSON.stringify(patch.noiseFloor),
+				patch.missRate === undefined ? (ev.audit_miss_rate ?? null) : patch.missRate,
+				nowIso(),
+				id,
+			);
+		this.act("evaluator.audit", { lineId: ev.line_id ?? undefined }, `${id} noise=${patch.noiseFloor ? "set" : "-"} miss=${patch.missRate ?? "-"}`);
+		return this.getEvaluator(id)!;
+	}
+
+	addAnchor(input: {
+		id?: string;
+		kind: string;
+		strength: string;
+		definitionPath?: string;
+		sealingLevel?: unknown;
+		note?: string;
+	}): AnchorRow {
+		const id = input.id ?? this.nextSeqId("AN", "anchors", 3);
+		if (this.getAnchor(id)) throw new Error(`锚已存在: ${id}`);
+		this.db
+			.prepare(`INSERT INTO anchors (id, kind, strength, definition_path, sealing_level, note) VALUES (?, ?, ?, ?, ?, ?)`)
+			.run(
+				id,
+				input.kind,
+				input.strength,
+				input.definitionPath ?? null,
+				input.sealingLevel === undefined ? null : JSON.stringify(input.sealingLevel),
+				input.note ?? null,
+			);
+		this.act("anchor.register", {}, `${id} ${input.kind} ${input.strength}`);
+		return this.getAnchor(id)!;
+	}
+
+	getAnchor(id: string): AnchorRow | undefined {
+		return this.db.prepare(`SELECT * FROM anchors WHERE id = ?`).get(id) as unknown as AnchorRow | undefined;
+	}
+
+	listAnchors(kind?: string): AnchorRow[] {
+		if (kind) {
+			return this.db.prepare(`SELECT * FROM anchors WHERE kind = ? ORDER BY id`).all(kind) as unknown as AnchorRow[];
+		}
+		return this.db.prepare(`SELECT * FROM anchors ORDER BY id`).all() as unknown as AnchorRow[];
+	}
+
+	// ---------- 派发进度表：每次 dispatch/review 在账本留一行，progress 据此渲染 ----------
+
+	addDispatch(input: {
+		lineId?: string;
+		hypothesisId?: string;
+		session?: string;
+		stage: string;
+		parentStage?: string;
+		goal?: string;
+		logPath?: string;
+	}): number {
+		const r = this.db
+			.prepare(
+				`INSERT INTO dispatches (line_id, hypothesis_id, session, stage, parent_stage, goal, status, log_path, started_at)
+         VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+			)
+			.run(
+				input.lineId ?? null,
+				input.hypothesisId ?? null,
+				input.session ?? null,
+				input.stage,
+				input.parentStage ?? null,
+				input.goal ?? null,
+				input.logPath ?? null,
+				nowIso(),
+			);
+		this.act("dispatch.start", { lineId: input.lineId }, `${input.stage}: ${(input.goal ?? "").slice(0, 100)}`);
+		return Number(r.lastInsertRowid);
+	}
+
+	updateDispatch(
+		id: number,
+		patch: { status?: string; exitCode?: number | null; pid?: number | null; summary?: string },
+	): void {
+		const row = this.db.prepare(`SELECT * FROM dispatches WHERE id = ?`).get(id) as
+			| { status: string }
+			| undefined;
+		if (!row) throw new Error(`派发记录不存在: D${id}`);
+		const status = patch.status ?? row.status;
+		const terminal = ["completed", "failed", "gate_blocked", "gateway_unreachable", "stale"].includes(status);
+		this.db
+			.prepare(
+				`UPDATE dispatches SET status = ?, exit_code = ?, pid = COALESCE(?, pid), summary = ?, finished_at = ? WHERE id = ?`,
+			)
+			.run(
+				status,
+				patch.exitCode === undefined ? null : patch.exitCode,
+				patch.pid === undefined ? null : patch.pid,
+				patch.summary ?? null,
+				terminal ? nowIso() : null,
+				id,
+			);
+		this.act("dispatch.finish", {}, `D${id} ${status}${patch.summary ? `: ${patch.summary.slice(0, 100)}` : ""}`);
+	}
+
+	listDispatches(filter: { status?: string; lineId?: string; limit?: number } = {}): DispatchRow[] {
+		const conds: string[] = [];
+		const params: (string | number)[] = [];
+		if (filter.status) {
+			conds.push("status = ?");
+			params.push(filter.status);
+		}
+		if (filter.lineId) {
+			conds.push("line_id = ?");
+			params.push(filter.lineId);
+		}
+		const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+		const limit = Math.min(filter.limit ?? 100, 1000);
+		params.push(limit);
+		return this.db
+			.prepare(`SELECT * FROM dispatches ${where} ORDER BY id DESC LIMIT ?`)
+			.all(...params) as unknown as DispatchRow[];
 	}
 
 	// ---------- workers（router/worker 编排）----------

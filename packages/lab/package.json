@@ -19,7 +19,7 @@
 	"scripts": {
 		"clean": "node ../../scripts/package-files.mjs clean dist",
 		"build": "tsc -p tsconfig.build.json",
-		"test": "node --test dist/test/*.test.js",
+		"test": "vitest --run",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"keywords": [

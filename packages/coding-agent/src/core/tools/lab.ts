@@ -1,15 +1,25 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
+	auditEvaluator,
 	captureSnapshot,
+	checkBrief,
+	checkNovelty,
 	collectLabWorker,
+	collectSignals,
 	compareLines,
 	compareScenarios,
+	computeNoiseFloor,
 	experimentBrief,
 	filterByDifficultyBand,
+	gatherBriefContext,
+	hypothesisContext,
 	LabRegistry,
 	poolStats,
+	rankHypotheses,
 	recallMetrics,
+	renderBrief,
 	runPythonScript,
 	spawnLabWorker,
 	validatePoolRows,
@@ -50,7 +60,32 @@ export const LAB_TOOL_NAMES = [
 	"lab_worker_spawn",
 	"lab_worker_status",
 	"lab_worker_collect",
+	"lab_hypothesis_signals",
+	"lab_propose_hypothesis",
+	"lab_list_hypotheses",
+	"lab_rank_hypotheses",
+	"lab_novelty_check",
+	"lab_record_novelty",
+	"lab_write_brief",
+	"lab_answer_question",
+	"lab_decide_hypothesis",
+	"lab_noise_floor",
+	"lab_audit_evaluator",
 ] as const;
+
+/** 方向层路由专用工具：worker 进程只执行派发方向，不做方向选择 */
+const ROUTER_ONLY_DIRECTIONS = new Set([
+	"lab_hypothesis_signals",
+	"lab_propose_hypothesis",
+	"lab_rank_hypotheses",
+	"lab_novelty_check",
+	"lab_record_novelty",
+	"lab_write_brief",
+	"lab_answer_question",
+	"lab_decide_hypothesis",
+	"lab_noise_floor",
+	"lab_audit_evaluator",
+]);
 
 let registry: LabRegistry | undefined;
 
@@ -158,6 +193,7 @@ export function labBeforeToolCheck(
 		revise_reason?: string;
 		evidence_class?: string;
 		note?: string;
+		hypothesis_id?: string;
 	};
 	// 线绑定：worker 进程只能写自己绑定的实验线（单一写入者）
 	const boundLine = process.env.LAB_LINE_ID;
@@ -172,6 +208,32 @@ export function labBeforeToolCheck(
 			return {
 				block: true,
 				reason: "worker 进程不做路由操作（分叉实验线或派生 worker 由 router 会话执行）。",
+			};
+		}
+		if (ROUTER_ONLY_DIRECTIONS.has(toolName)) {
+			return {
+				block: true,
+				reason: `方向层操作（${toolName}）由 router 会话执行：worker 只执行派发的方向。假设的提议、排序、新颖性判定与验收决定都在 router 侧，账本只接受 run 级写入。`,
+			};
+		}
+	}
+	// 派发绑定假设：dispatch --hypothesis 派发的 run 必须挂在该假设下，防止方向与证据脱钩
+	const boundHypothesis = process.env.LAB_HYPOTHESIS_ID;
+	if (boundHypothesis && toolName === "lab_register_run") {
+		if (!a.hypothesis_id || a.hypothesis_id !== boundHypothesis) {
+			return {
+				block: true,
+				reason: `本次派发绑定假设 ${boundHypothesis}：lab_register_run 必须携带 hypothesis_id="${boundHypothesis}"。假设与 run 的关联是证据可追溯的前提，脱钩的 run 不计入任何方向的验收。`,
+			};
+		}
+		const hyp = getLabRegistry(cwd).getHypothesis(a.hypothesis_id);
+		if (!hyp) {
+			return { block: true, reason: `假设不存在: ${a.hypothesis_id}。先用 lab_list_hypotheses 核对。` };
+		}
+		if (hyp.status !== "queued" && hyp.status !== "running") {
+			return {
+				block: true,
+				reason: `假设 ${hyp.id} 状态为 ${hyp.status}，只有 queued 或 running 的假设可登记 run；终态假设的证据链已关闭，另立新假设。`,
 			};
 		}
 	}
@@ -295,10 +357,31 @@ export function buildLabStateCard(cwd: string): string | undefined {
 		);
 	for (const cl of open) attention.push(`未决判断 C${cl.id}：${cl.statement}（引用前先验证）`);
 
+	// 方向层：只在 router 会话展示待决假设与闸门问题
+	const directions: string[] = [];
+	if (!process.env.LAB_LINE_ID) {
+		const queued = reg.listHypotheses({ status: "queued" }).slice(0, 3);
+		const proposed = reg.listHypotheses({ status: "proposed" }).length;
+		const openQ = reg.listQuestions({ status: "open" }).length;
+		if (queued.length > 0) {
+			directions.push(
+				`Queued directions: ${queued
+					.map(
+						(h) =>
+							`${h.id} "${h.statement.slice(0, 60)}" line=${h.line_id ?? "-"} rank=${h.rank_score != null ? Number(h.rank_score).toFixed(2) : "-"}`,
+					)
+					.join(" | ")}`,
+			);
+		}
+		if (proposed > 0) directions.push(`${proposed} direction(s) awaiting novelty check → lab_novelty_check`);
+		if (openQ > 0) directions.push(`${openQ} open gate question(s) → lab_answer_question`);
+	}
+
 	const parts = ["[Lab state card · injected by the harness every turn, no need to repeat it]"];
 	const lastLine = lines.at(-1);
 	if (lastLine) parts.push(`Current line: ${lastLine.id} (${lines.length} lines total)`);
 	parts.push(attention.length ? `Attention:\n${attention.map((x) => `- ${x}`).join("\n")}` : "Attention: none");
+	if (directions.length > 0) parts.push(`Directions:\n${directions.map((x) => `- ${x}`).join("\n")}`);
 	parts.push(
 		`Background: ${running.length} running run(s)${running.length ? ` (${running.map((r) => r.run_key).join(", ")})` : ""}, ` +
 			`${runningW.length} running worker(s)${runningW.length ? ` (${runningW.map((w) => `W${w.id}@${w.line_id}`).join(", ")})` : ""}`,
@@ -363,11 +446,15 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 					Type.Unknown({ description: "Experiment config object (hyperparams, judge settings, pool version)" }),
 				),
 				note: Type.Optional(Type.String()),
+				hypothesis_id: Type.Optional(
+					Type.String({ description: "Binding hypothesis id (H-0001); required when dispatched with --hypothesis" }),
+				),
 			}),
 			promptSnippet:
 				"lab_register_run: register an experiment run in the ledger (do this before running any evaluation)",
 			promptGuidelines: [
 				"Register every experiment with lab_register_run before running it; record results with lab_record_metric or lab_record_scenario_scores; never claim results without ledger evidence.",
+				"When dispatched with --hypothesis, pass hypothesis_id so the run's evidence is attributable to that direction.",
 			],
 			async execute(_id, params) {
 				const run = reg().registerRun({
@@ -378,6 +465,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 					endpoint: params.endpoint,
 					config: params.config,
 					note: params.note,
+					hypothesisId: params.hypothesis_id,
 				});
 				return json(run);
 			},
@@ -426,7 +514,18 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 						`手工证据（未独立复核）：${params.note ?? "未说明来源"}`,
 					);
 				}
-				return json(reg().getRun(params.run_key));
+				const updated = reg().getRun(params.run_key)!;
+				// 软提示：run 绑定假设且假设未判定时，提醒走判定而不是让假设悬空
+				if (params.status === "completed" && updated.hypothesis_id) {
+					const hyp = reg().getHypothesis(updated.hypothesis_id);
+					if (hyp && (hyp.status === "queued" || hyp.status === "running")) {
+						return json({
+							...updated,
+							_reminder: `run 已绑定假设 ${hyp.id}（状态 ${hyp.status}）：用 lab_decide_hypothesis 依据本 run 判定，或继续追加 run 直至达到停止条件 ${hyp.kill_after ?? 3}。`,
+						});
+					}
+				}
+				return json(updated);
 			},
 		}),
 		defineTool({
@@ -889,6 +988,349 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			}),
 			async execute(_id, params) {
 				return json(collectLabWorker(reg(), params.worker_id));
+			},
+		}),
+
+		// ---------- 方向层：提议 → 检索 → 排序 → 闸门 → 判定 ----------
+
+		defineTool({
+			name: "lab_hypothesis_signals",
+			label: "Extract direction signals",
+			description:
+				"Extract computable signals from the ledger for direction proposal: open-claim conflicts with measured direction, unexplained residual variance, cross-line config differences, evaluator saturation. Each signal carries kind, line, evidence refs and a summary; turn them into hypotheses with lab_propose_hypothesis.",
+			parameters: Type.Object({
+				max_per_kind: Type.Optional(Type.Number({ description: "Max signals per kind (default 5)" })),
+			}),
+			promptGuidelines: [
+				"Propose directions from ledger facts, not free association: start from lab_hypothesis_signals, and reference the signal via provenance/provenance_ref so every hypothesis is traceable.",
+			],
+			async execute(_id, params) {
+				const signals = collectSignals(reg(), { maxPerKind: params.max_per_kind });
+				return json({
+					count: signals.length,
+					signals,
+					note:
+						signals.length > 0
+							? "把信号转成假设时：statement 一句话、prediction 写明指标与最小变化、discriminator 写明哪个观测能区分备择解释。"
+							: "账本尚无可计算信号：先积累 run 与指标，或直接以 provenance=human 提议。",
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_propose_hypothesis",
+			label: "Propose hypothesis",
+			description:
+				"Register a research hypothesis as a first-class ledger object. Requires statement, prediction (which metric changes by how much), discriminator (which observation separates this hypothesis from alternatives) and provenance. Starts as 'proposed'; it becomes dispatchable ('queued') only after a novelty check passes and the question gate accepts the brief.",
+			parameters: Type.Object({
+				statement: Type.String({ description: "One-sentence falsifiable claim" }),
+				prediction: Type.String({ description: "If true, metric M changes by at least delta" }),
+				discriminator: Type.String({ description: "Which observation distinguishes this hypothesis from alternatives" }),
+				provenance: Type.Union([
+					Type.Literal("claim_conflict"),
+					Type.Literal("residual"),
+					Type.Literal("cross_line"),
+					Type.Literal("saturation"),
+					Type.Literal("human"),
+				]),
+				provenance_ref: Type.Optional(Type.String({ description: "Signal ref: C3, run_key, metric or line" })),
+				line_id: Type.Optional(Type.String({ description: "Target experiment line (bind now or before dispatch)" })),
+				parent_run: Type.Optional(Type.String()),
+				parent_hypothesis: Type.Optional(Type.String()),
+				prior: Type.Optional(Type.Number({ description: "Subjective confidence 0-1, ranking input only" })),
+				expected_gain: Type.Optional(Type.Number({ description: "Expected minimal effect; compared against 2x noise floor" })),
+				eval_ref: Type.Optional(Type.String({ description: "Evaluation script path (lab_eval_run_python registered)" })),
+				anchor_ref: Type.Optional(Type.String({ description: "Anchor id (AN-000) the signal is judged against" })),
+				held_out_spec: Type.Optional(Type.String({ description: "Held-out validation plan" })),
+				budget_cap: Type.Optional(Type.Number()),
+				kill_after: Type.Optional(Type.Number({ description: "Runs without gain before killing (default 3)" })),
+			}),
+			promptGuidelines: [
+				"propose 之后先 lab_novelty_check + lab_record_novelty，再 lab_write_brief 出任务书；prior 与 expected_gain 只参与排序，不作为证据引用。",
+			],
+			async execute(_id, params) {
+				const h = reg().addHypothesis({
+					statement: params.statement,
+					prediction: params.prediction,
+					discriminator: params.discriminator,
+					provenance: params.provenance,
+					provenanceRef: params.provenance_ref,
+					lineId: params.line_id,
+					parentRun: params.parent_run,
+					parentHypothesis: params.parent_hypothesis,
+					prior: params.prior,
+					expectedGain: params.expected_gain,
+					evalRef: params.eval_ref,
+					anchorRef: params.anchor_ref,
+					heldOutSpec: params.held_out_spec,
+					budgetCap: params.budget_cap,
+					killAfter: params.kill_after,
+				});
+				return json({
+					...h,
+					_next: "lab_novelty_check（判断是否已被做过）→ lab_record_novelty → lab_write_brief",
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_list_hypotheses",
+			label: "List hypotheses",
+			description: "List hypotheses with status, rank and provenance. Use to review the direction portfolio.",
+			parameters: Type.Object({
+				status: Type.Optional(Type.String({ description: "proposed|queued|running|supported|refuted|killed|stale" })),
+				line_id: Type.Optional(Type.String()),
+				limit: Type.Optional(Type.Number()),
+			}),
+			async execute(_id, params) {
+				const rows = reg().listHypotheses({ status: params.status, lineId: params.line_id, limit: params.limit });
+				if (rows.length === 0) return text("(no matching hypotheses)");
+				return text(
+					[
+						"id\tstatus\trank\tline\tprovenance\tstatement",
+						...rows.map(
+							(h) =>
+								`${h.id}\t${h.status}\t${h.rank_score != null ? Number(h.rank_score).toFixed(3) : "-"}\t${h.line_id ?? "-"}\t${h.provenance}\t${h.statement.slice(0, 80)}`,
+						),
+					].join("\n"),
+				);
+			},
+		}),
+		defineTool({
+			name: "lab_rank_hypotheses",
+			label: "Rank hypotheses",
+			description:
+				"Compute and persist ranking for all non-terminal hypotheses: line quality quantile x unexplored branch x anchor strength x novelty x learnability. All components are written to the ledger for post-hoc audit; scores influence execution order only, never count as evidence.",
+			parameters: Type.Object({
+				line_id: Type.Optional(Type.String()),
+			}),
+			promptGuidelines: [
+				"每轮派发前重算排序；rank_score 只决定先做哪个，不进入证据链。",
+			],
+			async execute(_id, params) {
+				const ranked = rankHypotheses(reg(), { lineId: params.line_id });
+				if (ranked.length === 0) return text("(no non-terminal hypotheses to rank)");
+				return text(
+					[
+						"id\tscore\tq\tchildren\tanchor\tnovelty\tlearn\tnoise-defaulted\tstatement",
+						...ranked.map(
+							({ hypothesis: h, components: c }) =>
+								`${h.id}\t${c.score.toFixed(3)}\t${c.q.toFixed(2)}\t${c.children}\t${c.anchorStrength.toFixed(2)}\t${c.noveltyFactor.toFixed(2)}\t${c.learnability.toFixed(2)}\t${c.noiseDefaulted ? "yes" : "no"}\t${h.statement.slice(0, 60)}`,
+						),
+					].join("\n"),
+				);
+			},
+		}),
+		defineTool({
+			name: "lab_novelty_check",
+			label: "Novelty search",
+			description:
+				"Search related work for a hypothesis via papers.cool (arXiv recall) and OpenAlex (citations, journals), with a 30-day per-query cache. Returns candidates only; the verdict is decided in this session: read the candidates and answer whether the same mechanism has been done in the same setting.",
+			parameters: Type.Object({
+				hypothesis_id: Type.String(),
+			}),
+			promptGuidelines: [
+				"检索结果只给候选：逐条回答三个固定问题——是否同一机制、是否同一数据与场景、差异点是什么，然后 lab_record_novelty 入账。",
+			],
+			async execute(_id, params) {
+				const result = await checkNovelty(reg(), params.hypothesis_id);
+				return json({
+					...result,
+					_instruction:
+						"对前 5 条候选逐条回答：同一机制？同一场景？差异点？之后用 lab_record_novelty 记录 verdict（novel|adjacent|duplicate|insufficient）与证据。",
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_record_novelty",
+			label: "Record novelty verdict",
+			description:
+				"Record the novelty verdict for a hypothesis with evidence. 'duplicate' kills the hypothesis immediately; 'insufficient' requires a better query before the hypothesis can proceed.",
+			parameters: Type.Object({
+				hypothesis_id: Type.String(),
+				verdict: Type.Union([
+					Type.Literal("novel"),
+					Type.Literal("adjacent"),
+					Type.Literal("duplicate"),
+					Type.Literal("insufficient"),
+				]),
+				evidence: Type.Optional(
+					Type.Array(
+						Type.Object({
+							source: Type.String(),
+							id: Type.String(),
+							title: Type.String(),
+							year: Type.Optional(Type.Number()),
+							citations: Type.Optional(Type.Number()),
+							url: Type.Optional(Type.String()),
+							reason: Type.Optional(Type.String({ description: "Same mechanism? Same setting? Key difference?" })),
+						}),
+					),
+				),
+				checked_by: Type.Optional(Type.String({ description: "Model or person who judged" })),
+			}),
+			promptGuidelines: [
+				"verdict 必须基于 lab_novelty_check 的候选证据；duplicate 会终止假设，引用具体论文说明理由。",
+			],
+			async execute(_id, params) {
+				const row = reg().addNoveltyCheck({
+					hypothesisId: params.hypothesis_id,
+					query: params.evidence?.length ? `${params.evidence.length} evidence item(s)` : "manual",
+					sources: params.evidence?.map((e) => e.source),
+					verdict: params.verdict,
+					evidenceIds: params.evidence,
+					checkedBy: params.checked_by,
+				});
+				if (params.verdict === "duplicate") {
+					const killed = reg().decideHypothesis(params.hypothesis_id, "killed", {
+						note: `新颖性判定 duplicate：${params.evidence?.[0]?.title ?? "见证据"}`,
+					});
+					return json({ check: row, hypothesis: killed, _note: "重复工作，假设已终止" });
+				}
+				return json({
+					check: row,
+					_next: params.verdict === "insufficient" ? "换更精确的检索词重查（lab_novelty_check）" : "lab_write_brief 出任务书",
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_write_brief",
+			label: "Write brief via question gate",
+			description:
+				"Question gate + brief rendering. Checks the hypothesis for must-answer fields (eval_ref, anchor_ref, held_out_spec, line binding); missing ones block. Questions with safe defaults (min effect = 2x noise floor, budget = line median) are recorded and defaulted. On pass, renders the six-section brief to briefs/<H-id>.md and queues the hypothesis for dispatch.",
+			parameters: Type.Object({
+				hypothesis_id: Type.String(),
+			}),
+			promptGuidelines: [
+				"闸门缺项时把问题带回给发起者并等待回答（lab_answer_question），不要代答；带默认答案的问题超时可默认放行。",
+			],
+			async execute(_id, params) {
+				const h = reg().getHypothesis(params.hypothesis_id);
+				if (!h) return text(`Error: hypothesis ${params.hypothesis_id} does not exist`);
+				const ctx = gatherBriefContext(reg(), h);
+				const check = checkBrief(h, ctx);
+				if (!check.pass) {
+					for (const q of check.questions) {
+						const existing = reg()
+							.listQuestions({ hypothesisId: h.id, status: "open" })
+							.find((row) => row.field === q.field);
+						if (!existing) reg().addQuestion({ hypothesisId: h.id, field: q.field, question: q.question, defaultAnswer: q.defaultAnswer });
+					}
+					return json({
+						pass: false,
+						missing: check.missing,
+						questions: check.questions,
+						notes: check.notes,
+						_next: "补齐必答字段（lab_update run 无关：假设字段由 lab_propose_hypothesis 更正时重新提议或直接补 eval_ref 等）",
+					});
+				}
+				const brief = renderBrief(h, ctx);
+				const briefsDir = join(cwd, "briefs");
+				mkdirSync(briefsDir, { recursive: true });
+				const path = join(briefsDir, `${h.id}.md`);
+				writeFileSync(path, brief, "utf-8");
+				const queued = reg().updateHypothesis(h.id, { status: "queued" });
+				return json({
+					pass: true,
+					path,
+					hypothesis: queued,
+					defaulted: check.questions,
+					_next: "labpi.mjs dispatch --hypothesis " + h.id,
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_answer_question",
+			label: "Answer gate question",
+			description:
+				"Answer a question raised by the brief gate (or list open ones). Without question_id this lists open questions; answering closes the question and it feeds back into the next lab_write_brief.",
+			parameters: Type.Object({
+				question_id: Type.Optional(Type.Number({ description: "Q number; omit to list open questions" })),
+				answer: Type.Optional(Type.String()),
+				use_default: Type.Optional(
+					Type.Boolean({ description: "Accept the recorded default answer (timeout path)" }),
+				),
+				status: Type.Optional(Type.String({ description: "Filter when listing" })),
+			}),
+			async execute(_id, params) {
+				if (params.question_id === undefined) {
+					return json(reg().listQuestions({ status: params.status ?? "open" }));
+				}
+				const q = reg()
+					.listQuestions({})
+					.find((row) => row.id === params.question_id);
+				if (!q) return text(`Error: question Q${params.question_id} does not exist`);
+				const answer = params.use_default ? (q.default_answer ?? "") : (params.answer ?? "");
+				if (!answer.trim()) {
+					return text("Error: provide answer, or use_default=true to accept the default");
+				}
+				return json(reg().answerQuestion(params.question_id, answer, Boolean(params.use_default)));
+			},
+		}),
+		defineTool({
+			name: "lab_decide_hypothesis",
+			label: "Decide hypothesis",
+			description:
+				"Decide a running hypothesis. 'supported' requires a verified run_key and additionally records an evidence-linked claim; 'refuted'/'killed' close the direction with a note. Decisions belong to the router session or a human, never to the executing worker.",
+			parameters: Type.Object({
+				hypothesis_id: Type.String(),
+				decision: Type.Union([Type.Literal("supported"), Type.Literal("refuted"), Type.Literal("killed")]),
+				run_key: Type.Optional(Type.String({ description: "Required for supported; must be verification=verified" })),
+				note: Type.Optional(Type.String()),
+			}),
+			promptGuidelines: [
+				"supported 的四条验收：run 已 verified、配对检验 p<0.05、增益超过两倍噪声底、held-out 场景同向；任何一条不满足都不算支持。",
+			],
+			async execute(_id, params) {
+				const h = reg().decideHypothesis(params.hypothesis_id, params.decision, {
+					runKey: params.run_key,
+					note: params.note,
+				});
+				if (params.decision === "supported" && params.run_key) {
+					const run = reg().getRun(params.run_key);
+					const claim = reg().addClaim({
+						statement: h.statement,
+						lineId: h.line_id,
+						evidence: [params.run_key],
+					});
+					return json({ hypothesis: h, claim, run_verification: run?.verification });
+				}
+				return json({ hypothesis: h });
+			},
+		}),
+		defineTool({
+			name: "lab_noise_floor",
+			label: "Measure noise floor",
+			description:
+				"Measure the empirical noise floor for a metric: standard deviation across verified runs that share the same config fingerprint. Requires at least 3 same-config runs. The floor feeds the acceptance rule (gain must exceed 2x noise) and the learnability ranking component.",
+			parameters: Type.Object({
+				line_id: Type.String(),
+				metric: Type.String(),
+				min_runs: Type.Optional(Type.Number({ description: "Default 3" })),
+				evaluator_id: Type.Optional(Type.String()),
+			}),
+			async execute(_id, params) {
+				return json(
+					computeNoiseFloor(reg(), {
+						lineId: params.line_id,
+						metric: params.metric,
+						minRuns: params.min_runs,
+						evaluatorId: params.evaluator_id,
+					}),
+				);
+			},
+		}),
+		defineTool({
+			name: "lab_audit_evaluator",
+			label: "Audit evaluator",
+			description:
+				"Audit an evaluator's quality using the line's latest verified run: determinism (run the eval spec twice, compare RESULT_JSON) and, when the eval spec declares probes (deliberately broken script variants), a miss rate for failing to distinguish them from the reference. The judge sets the ceiling: audit it before trusting a saturated metric.",
+			parameters: Type.Object({
+				evaluator_id: Type.String(),
+			}),
+			promptGuidelines: [
+				"评测器审计在 loop 外执行；漏检率非零时，该线的代理指标提升要降权引用。",
+			],
+			async execute(_id, params) {
+				return json(await auditEvaluator(reg(), cwd, params.evaluator_id));
 			},
 		}),
 	];
