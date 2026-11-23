@@ -232,6 +232,38 @@ export interface AnchorRow {
 	note?: string;
 }
 
+/** 群聊评审（council）：executor/auditor/chair 三类角色进程在共享会话记录中对抗质证，
+ *  chair 给出 approved/rejected 裁决；裁决是 run 完成门禁的依据，fail-closed */
+export interface CouncilRow {
+	id: string;
+	line_id?: string;
+	run_key?: string;
+	topic: string;
+	/** open | approved | rejected | expired */
+	status: string;
+	max_rounds: number;
+	round: number;
+	verdict?: string;
+	verdict_note?: string;
+	verdict_refs?: string;
+	created_at: string;
+	closed_at?: string;
+}
+
+/** 群聊评审中的单条发言：round 内按角色留痕，refs 指向证据（run/工件/claim） */
+export interface CouncilMessageRow {
+	id: number;
+	council_id: string;
+	round: number;
+	/** executor | auditor | chair 等角色发言 */
+	role: string;
+	content: string;
+	refs?: string;
+	/** 审计意见的严重级别：blocking | advisory | note；executor 与 chair 发言可空 */
+	severity?: string;
+	ts: string;
+}
+
 export interface RunInput {
 	lineId: string;
 	title?: string;
@@ -483,6 +515,32 @@ CREATE TABLE IF NOT EXISTS dispatches (
 );
 CREATE INDEX IF NOT EXISTS idx_dispatches_stage ON dispatches(stage);
 CREATE INDEX IF NOT EXISTS idx_dispatches_status ON dispatches(status);
+CREATE TABLE IF NOT EXISTS councils (
+  id TEXT PRIMARY KEY,
+  line_id TEXT,
+  run_key TEXT,
+  topic TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  max_rounds INTEGER NOT NULL DEFAULT 3,
+  round INTEGER NOT NULL DEFAULT 0,
+  verdict TEXT,
+  verdict_note TEXT,
+  verdict_refs TEXT,
+  created_at TEXT NOT NULL,
+  closed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_councils_status ON councils(status);
+CREATE TABLE IF NOT EXISTS council_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  council_id TEXT NOT NULL REFERENCES councils(id),
+  round INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  refs TEXT,
+  severity TEXT,
+  ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_council_messages_council ON council_messages(council_id);
 `;
 
 export class LabRegistry {
@@ -519,6 +577,7 @@ export class LabRegistry {
 		add("metrics", "revise_reason", "revise_reason TEXT");
 		add("runs", "hypothesis_id", "hypothesis_id TEXT");
 		add("dispatches", "parent_stage", "parent_stage TEXT");
+		add("council_messages", "severity", "severity TEXT");
 	}
 
 	close(): void {
@@ -1398,9 +1457,156 @@ export class LabRegistry {
 		return this.getWorker(id)!;
 	}
 
+	// ---------- 群聊评审（council）：executor/auditor/chair 质证与裁决 ----------
+
+	openCouncil(opts: { lineId?: string; runKey?: string; topic: string; maxRounds?: number }): CouncilRow {
+		if (!opts.topic?.trim()) throw new Error("council 必须给出议题（topic）");
+		if (!opts.runKey && !opts.lineId) throw new Error("openCouncil 需要 runKey 或 lineId 之一");
+		// 同一 runKey / 同一实验线同时只允许一个进行中的 council，避免裁决口径分裂
+		if (opts.runKey) {
+			const existing = this.db
+				.prepare(`SELECT id FROM councils WHERE run_key = ? AND status = 'open'`)
+				.get(opts.runKey) as unknown as { id: string } | undefined;
+			if (existing) throw new Error(`run ${opts.runKey} 已有进行中的 council: ${existing.id}（先裁决或关闭再开新的）`);
+		}
+		if (opts.lineId) {
+			const existing = this.db
+				.prepare(`SELECT id FROM councils WHERE line_id = ? AND status = 'open'`)
+				.get(opts.lineId) as unknown as { id: string } | undefined;
+			if (existing) throw new Error(`实验线 ${opts.lineId} 已有进行中的 council: ${existing.id}（先裁决或关闭再开新的）`);
+		}
+		let id: string;
+		if (opts.runKey) {
+			// 同一 run 的旧 council 已关闭（rejected/expired）时允许再开，id 带序号去重
+			id = `council-${opts.runKey}`;
+			if (this.getCouncil(id)) {
+				const row = this.db
+					.prepare(`SELECT COUNT(*) AS n FROM councils WHERE id LIKE ?`)
+					.get(`council-${opts.runKey}-%`) as unknown as { n: number };
+				id = `council-${opts.runKey}-${String(Number(row.n) + 2).padStart(3, "0")}`;
+			}
+		} else if (opts.lineId) {
+			// 序号覆盖该线全部 council：含 runKey 绑定的（其 line_id 为空但属于本线的 run）
+			const row = this.db
+				.prepare(
+					`SELECT COUNT(*) AS n FROM councils WHERE line_id = ?
+					   OR run_key IN (SELECT run_key FROM runs WHERE line_id = ?)`,
+				)
+				.get(opts.lineId, opts.lineId) as unknown as { n: number };
+			id = `council-${opts.lineId}-${String(Number(row.n) + 1).padStart(3, "0")}`;
+		} else {
+			throw new Error("openCouncil 需要 runKey 或 lineId 之一");
+		}
+		this.db
+			.prepare(
+				`INSERT INTO councils (id, line_id, run_key, topic, status, max_rounds, round, created_at)
+         VALUES (?, ?, ?, ?, 'open', ?, 0, ?)`,
+			)
+			.run(id, opts.lineId ?? null, opts.runKey ?? null, opts.topic, opts.maxRounds ?? 3, nowIso());
+		this.act("council.open", { lineId: opts.lineId, runKey: opts.runKey }, `${id} ${opts.topic.slice(0, 100)}`);
+		return this.getCouncil(id)!;
+	}
+
+	getCouncil(id: string): CouncilRow | undefined {
+		return this.db.prepare(`SELECT * FROM councils WHERE id = ?`).get(id) as unknown as CouncilRow | undefined;
+	}
+
+	listCouncils(filter: { status?: string; lineId?: string; runKey?: string } = {}): CouncilRow[] {
+		const conds: string[] = [];
+		const params: string[] = [];
+		if (filter.status) {
+			conds.push("status = ?");
+			params.push(filter.status);
+		}
+		if (filter.lineId) {
+			conds.push("line_id = ?");
+			params.push(filter.lineId);
+		}
+		if (filter.runKey) {
+			conds.push("run_key = ?");
+			params.push(filter.runKey);
+		}
+		const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
+		return this.db
+			.prepare(`SELECT * FROM councils ${where} ORDER BY created_at, id`)
+			.all(...params) as unknown as CouncilRow[];
+	}
+
+	addCouncilMessage(opts: {
+		councilId: string;
+		round: number;
+		role: string;
+		content: string;
+		refs?: string;
+		/** blocking | advisory | note；不传表示未分级（executor/chair 发言） */
+		severity?: string;
+	}): number {
+		const council = this.getCouncil(opts.councilId);
+		if (!council) throw new Error(`council 不存在: ${opts.councilId}`);
+		if (council.status !== "open") throw new Error(`council ${opts.councilId} 已关闭（${council.status}），不能再发言`);
+		if (!Number.isInteger(opts.round) || opts.round < 1) throw new Error(`round 非法: ${opts.round}（轮次从 1 开始）`);
+		if (opts.round > council.max_rounds) {
+			throw new Error(`round ${opts.round} 超出 council ${opts.councilId} 的轮次上限 ${council.max_rounds}`);
+		}
+		if (!opts.content?.trim()) throw new Error("发言内容不能为空");
+		if (opts.severity !== undefined && !["blocking", "advisory", "note"].includes(opts.severity)) {
+			throw new Error(`severity 非法: ${opts.severity}（只允许 blocking|advisory|note）`);
+		}
+		const r = this.db
+			.prepare(
+				`INSERT INTO council_messages (council_id, round, role, content, refs, severity, ts) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(opts.councilId, opts.round, opts.role, opts.content, opts.refs ?? null, opts.severity ?? null, nowIso());
+		this.act(
+			"council.message",
+			{ lineId: council.line_id ?? undefined, runKey: council.run_key ?? undefined },
+			`${opts.councilId} R${opts.round} ${opts.role}${opts.severity ? `[${opts.severity}]` : ""}: ${opts.content.slice(0, 80)}`,
+		);
+		return Number(r.lastInsertRowid);
+	}
+
+	councilTranscript(councilId: string): CouncilMessageRow[] {
+		return this.db
+			.prepare(`SELECT * FROM council_messages WHERE council_id = ? ORDER BY id`)
+			.all(councilId) as unknown as CouncilMessageRow[];
+	}
+
+	closeCouncil(
+		id: string,
+		status: "approved" | "rejected" | "expired",
+		verdictNote?: string,
+		verdictRefs?: string,
+	): CouncilRow {
+		const council = this.getCouncil(id);
+		if (!council) throw new Error(`council 不存在: ${id}`);
+		if (council.status !== "open") throw new Error(`council ${id} 已关闭（${council.status}），裁决只能从 open 状态做出`);
+		this.db
+			.prepare(
+				`UPDATE councils SET status = ?, verdict = ?, verdict_note = ?, verdict_refs = ?, closed_at = ? WHERE id = ?`,
+			)
+			.run(status, status, verdictNote ?? null, verdictRefs ?? null, nowIso(), id);
+		this.act(
+			"council.verdict",
+			{ lineId: council.line_id ?? undefined, runKey: council.run_key ?? undefined },
+			`${id} ${status}${verdictNote ? `: ${verdictNote.slice(0, 100)}` : ""}`,
+		);
+		return this.getCouncil(id)!;
+	}
+
+	bumpCouncilRound(id: string): CouncilRow {
+		const council = this.getCouncil(id);
+		if (!council) throw new Error(`council 不存在: ${id}`);
+		if (council.status !== "open") throw new Error(`council ${id} 已关闭（${council.status}），无法推进轮次`);
+		this.db.prepare(`UPDATE councils SET round = round + 1 WHERE id = ?`).run(id);
+		return this.getCouncil(id)!;
+	}
+
 	// ---------- 执行锁：同一实验线同时只允许一个进程写入 ----------
 
 	private actor(): string {
+		// 多角色质证：LAB_ROLE 声明进程角色（executor/auditor/chair），活动日志按角色记名
+		const role = process.env.LAB_ROLE;
+		if (role) return `${role}:pid${process.pid}`;
 		return `${process.env.LAB_LINE_ID ? "worker" : "router"}:pid${process.pid}`;
 	}
 

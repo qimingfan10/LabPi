@@ -29,7 +29,7 @@ Research experiment discipline for pi: experiment ledger, evidence-linked claims
 
 | 文件 | 职责 |
 | --- | --- |
-| store.ts | 实验账本：lines、runs、metrics、artifacts、claims、workers、line_locks、activity（node:sqlite） |
+| store.ts | 实验账本：lines、runs、metrics、artifacts、claims、workers、line_locks、councils、council_messages、activity（node:sqlite） |
 | recall.ts | 指标轨迹检索与实验线认知摘要 |
 | resilient.ts | 可靠 LLM 调用底座（探活回退、失败三分类、审计） |
 | stats.ts | Wilcoxon 符号秩（n≤16 精确枚举）、配对 t、胜平负 |
@@ -39,3 +39,8 @@ Research experiment discipline for pi: experiment ledger, evidence-linked claims
 | verify.ts | 独立复核：重跑评测命令，重跑结果与账本指标逐项比对；漂移检测优先于数值比对 |
 | snapshot.ts | 输入快照：脚本副本、数据/环境/git 指纹清单，供回溯与漂移判定 |
 | worker.ts | router/worker 进程编排 |
+| council.ts | 群聊评审纯函数层：未决质疑、blocking 闩锁、裁决门禁（fail-closed） |
+
+## 群聊评审（council）
+
+`lab_council_open / post / read / verdict` 四个工具支撑 executor、auditor、chair 三角色围绕同一份共享会话记录对抗质证：executor 如实汇报任务书完成情况，auditor 只读账本与工件并逐项质疑（缺陷按 `severity=blocking` 分级），chair 通读记录后裁决 approved 或 rejected。blocking 质疑在本场 council 内终身未决，approved 前必须清零，且「引用约束式放行」在账本层与工具层均被拒绝；run 完成门禁要求存在覆盖该 run 且状态为 approved 的 council，rejected 与 expired 一律按 fail-closed 处理。

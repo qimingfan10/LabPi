@@ -2,7 +2,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
+	adjudicate,
 	auditEvaluator,
+	blockingOutstanding,
 	captureSnapshot,
 	checkBrief,
 	checkNovelty,
@@ -16,10 +18,12 @@ import {
 	gatherBriefContext,
 	hypothesisContext,
 	LabRegistry,
+	outstandingIssues,
 	poolStats,
 	rankHypotheses,
 	recallMetrics,
 	renderBrief,
+	renderTranscript,
 	runPythonScript,
 	spawnLabWorker,
 	validatePoolRows,
@@ -71,6 +75,10 @@ export const LAB_TOOL_NAMES = [
 	"lab_decide_hypothesis",
 	"lab_noise_floor",
 	"lab_audit_evaluator",
+	"lab_council_open",
+	"lab_council_post",
+	"lab_council_read",
+	"lab_council_verdict",
 ] as const;
 
 /** 方向层路由专用工具：worker 进程只执行派发方向，不做方向选择 */
@@ -217,6 +225,43 @@ export function labBeforeToolCheck(
 			};
 		}
 	}
+	// 角色门禁：LAB_ROLE 声明本进程角色（executor/auditor/chair），各角色只做分内的事。
+	// 审计员只读证据并质证，主持人只裁决，执行者不自行给出裁决。
+	const role = process.env.LAB_ROLE;
+	if (role) {
+		const DENY: Record<string, string[]> = {
+			auditor: [
+				"lab_register_run",
+				"lab_record_metric",
+				"lab_record_scenario_scores",
+				"lab_update_run",
+				"lab_eval_run_python",
+				"lab_verify_run",
+				"lab_council_verdict",
+				"lab_fork_line",
+				"lab_worker_spawn",
+			],
+			chair: [
+				"lab_register_run",
+				"lab_record_metric",
+				"lab_record_scenario_scores",
+				"lab_update_run",
+				"lab_eval_run_python",
+				"lab_verify_run",
+				"lab_council_post",
+				"lab_fork_line",
+				"lab_worker_spawn",
+			],
+			executor: ["lab_council_verdict"],
+		};
+		const denied = DENY[role];
+		if (denied?.includes(toolName)) {
+			return {
+				block: true,
+				reason: `本进程角色为 ${role}：禁止调用 ${toolName}。审计员只读证据并质证，主持人只裁决，执行者不自行给出裁决。`,
+			};
+		}
+	}
 	// 派发绑定假设：dispatch --hypothesis 派发的 run 必须挂在该假设下，防止方向与证据脱钩
 	const boundHypothesis = process.env.LAB_HYPOTHESIS_ID;
 	if (boundHypothesis && toolName === "lab_register_run") {
@@ -264,6 +309,17 @@ export function labBeforeToolCheck(
 			return {
 				block: true,
 				reason: `Run ${a.run_key} 的评测代码已漂移（${run.verification_note}）。快照副本在 runs/${a.run_key}/snapshot/，先用它确认当时的行为，或恢复脚本后再 lab_verify_run；代码漂移时完成标记会把不可比的结果固化成可信数据。`,
+			};
+		}
+		// 裁决硬门禁：run 完成前必须经过 council 质证并通过裁决（fail-closed）。
+		// 没有裁决、被拒绝或轮次耗尽的 run 一律不能标 completed——「说过完成了」本身不是证据。
+		const councils = getLabRegistry(cwd).listCouncils({ runKey: a.run_key });
+		if (!councils.some((c) => c.status === "approved")) {
+			const existing = councils.at(-1);
+			const detail = existing ? `council ${existing.id} 当前状态为 ${existing.status}` : "尚未召集 council";
+			return {
+				block: true,
+				reason: `Run ${a.run_key} 未通过群聊评审裁决（${detail}）。run 完成前必须先用 lab_council_open 召集 council 质证，由 chair 裁决 approved；没有裁决、被拒绝（rejected）或轮次耗尽（expired）的 run 一律不能标 completed——「说过完成了」本身不是证据。`,
 			};
 		}
 		const metrics = getLabRegistry(cwd).listMetrics({ runKey: a.run_key });
@@ -339,6 +395,8 @@ export function buildLabStateCard(cwd: string): string | undefined {
 	const mismatched = reg.listRuns().filter((r) => r.verification === "mismatch");
 	const drifting = reg.listRuns().filter((r) => r.verification === "drift");
 	const nearBreaker = lines.filter((l) => l.status !== "paused" && Number(l.consecutive_failures ?? 0) >= 2);
+	const openCouncils = reg.listCouncils({ status: "open" });
+	const blockedCouncils = reg.listCouncils().filter((c) => c.status === "rejected" || c.status === "expired");
 
 	const attention: string[] = [];
 	for (const l of paused)
@@ -356,6 +414,10 @@ export function buildLabStateCard(cwd: string): string | undefined {
 			`${awaiting.length} 个 worker 已结束待收取：${awaiting.map((w) => `W${w.id}`).join(", ")} → lab_worker_collect`,
 		);
 	for (const cl of open) attention.push(`未决判断 C${cl.id}：${cl.statement}（引用前先验证）`);
+	for (const c of openCouncils)
+		attention.push(
+			`council ${c.id} 待质证${c.run_key ? `（run ${c.run_key}）` : ""}：${c.topic}（round ${c.round}/${c.max_rounds}，未决质疑 ${outstandingIssues(reg, c.id).length}，其中 blocking ${blockingOutstanding(reg, c.id).length}）→ 补齐证据后由 chair 用 lab_council_verdict 裁决`,
+		);
 
 	// 方向层：只在 router 会话展示待决假设与闸门问题
 	const directions: string[] = [];
@@ -381,6 +443,16 @@ export function buildLabStateCard(cwd: string): string | undefined {
 	const lastLine = lines.at(-1);
 	if (lastLine) parts.push(`Current line: ${lastLine.id} (${lines.length} lines total)`);
 	parts.push(attention.length ? `Attention:\n${attention.map((x) => `- ${x}`).join("\n")}` : "Attention: none");
+	if (blockedCouncils.length > 0) {
+		parts.push(
+			`完成被拦:\n${blockedCouncils
+				.map(
+					(c) =>
+						`- council ${c.id}${c.run_key ? `（run ${c.run_key}）` : ""} ${c.status}：${c.verdict_note ?? c.topic} → 修复后重新 lab_council_open 召集评审`,
+				)
+				.join("\n")}`,
+		);
+	}
 	if (directions.length > 0) parts.push(`Directions:\n${directions.map((x) => `- ${x}`).join("\n")}`);
 	parts.push(
 		`Background: ${running.length} running run(s)${running.length ? ` (${running.map((r) => r.run_key).join(", ")})` : ""}, ` +
@@ -447,7 +519,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 				),
 				note: Type.Optional(Type.String()),
 				hypothesis_id: Type.Optional(
-					Type.String({ description: "Binding hypothesis id (H-0001); required when dispatched with --hypothesis" }),
+					Type.String({
+						description: "Binding hypothesis id (H-0001); required when dispatched with --hypothesis",
+					}),
 				),
 			}),
 			promptSnippet:
@@ -1024,7 +1098,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			parameters: Type.Object({
 				statement: Type.String({ description: "One-sentence falsifiable claim" }),
 				prediction: Type.String({ description: "If true, metric M changes by at least delta" }),
-				discriminator: Type.String({ description: "Which observation distinguishes this hypothesis from alternatives" }),
+				discriminator: Type.String({
+					description: "Which observation distinguishes this hypothesis from alternatives",
+				}),
 				provenance: Type.Union([
 					Type.Literal("claim_conflict"),
 					Type.Literal("residual"),
@@ -1033,12 +1109,18 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 					Type.Literal("human"),
 				]),
 				provenance_ref: Type.Optional(Type.String({ description: "Signal ref: C3, run_key, metric or line" })),
-				line_id: Type.Optional(Type.String({ description: "Target experiment line (bind now or before dispatch)" })),
+				line_id: Type.Optional(
+					Type.String({ description: "Target experiment line (bind now or before dispatch)" }),
+				),
 				parent_run: Type.Optional(Type.String()),
 				parent_hypothesis: Type.Optional(Type.String()),
 				prior: Type.Optional(Type.Number({ description: "Subjective confidence 0-1, ranking input only" })),
-				expected_gain: Type.Optional(Type.Number({ description: "Expected minimal effect; compared against 2x noise floor" })),
-				eval_ref: Type.Optional(Type.String({ description: "Evaluation script path (lab_eval_run_python registered)" })),
+				expected_gain: Type.Optional(
+					Type.Number({ description: "Expected minimal effect; compared against 2x noise floor" }),
+				),
+				eval_ref: Type.Optional(
+					Type.String({ description: "Evaluation script path (lab_eval_run_python registered)" }),
+				),
 				anchor_ref: Type.Optional(Type.String({ description: "Anchor id (AN-000) the signal is judged against" })),
 				held_out_spec: Type.Optional(Type.String({ description: "Held-out validation plan" })),
 				budget_cap: Type.Optional(Type.Number()),
@@ -1076,7 +1158,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			label: "List hypotheses",
 			description: "List hypotheses with status, rank and provenance. Use to review the direction portfolio.",
 			parameters: Type.Object({
-				status: Type.Optional(Type.String({ description: "proposed|queued|running|supported|refuted|killed|stale" })),
+				status: Type.Optional(
+					Type.String({ description: "proposed|queued|running|supported|refuted|killed|stale" }),
+				),
 				line_id: Type.Optional(Type.String()),
 				limit: Type.Optional(Type.Number()),
 			}),
@@ -1102,9 +1186,7 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			parameters: Type.Object({
 				line_id: Type.Optional(Type.String()),
 			}),
-			promptGuidelines: [
-				"每轮派发前重算排序；rank_score 只决定先做哪个，不进入证据链。",
-			],
+			promptGuidelines: ["每轮派发前重算排序；rank_score 只决定先做哪个，不进入证据链。"],
 			async execute(_id, params) {
 				const ranked = rankHypotheses(reg(), { lineId: params.line_id });
 				if (ranked.length === 0) return text("(no non-terminal hypotheses to rank)");
@@ -1161,7 +1243,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 							year: Type.Optional(Type.Number()),
 							citations: Type.Optional(Type.Number()),
 							url: Type.Optional(Type.String()),
-							reason: Type.Optional(Type.String({ description: "Same mechanism? Same setting? Key difference?" })),
+							reason: Type.Optional(
+								Type.String({ description: "Same mechanism? Same setting? Key difference?" }),
+							),
 						}),
 					),
 				),
@@ -1187,7 +1271,10 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 				}
 				return json({
 					check: row,
-					_next: params.verdict === "insufficient" ? "换更精确的检索词重查（lab_novelty_check）" : "lab_write_brief 出任务书",
+					_next:
+						params.verdict === "insufficient"
+							? "换更精确的检索词重查（lab_novelty_check）"
+							: "lab_write_brief 出任务书",
 				});
 			},
 		}),
@@ -1212,7 +1299,13 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 						const existing = reg()
 							.listQuestions({ hypothesisId: h.id, status: "open" })
 							.find((row) => row.field === q.field);
-						if (!existing) reg().addQuestion({ hypothesisId: h.id, field: q.field, question: q.question, defaultAnswer: q.defaultAnswer });
+						if (!existing)
+							reg().addQuestion({
+								hypothesisId: h.id,
+								field: q.field,
+								question: q.question,
+								defaultAnswer: q.defaultAnswer,
+							});
 					}
 					return json({
 						pass: false,
@@ -1273,7 +1366,9 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			parameters: Type.Object({
 				hypothesis_id: Type.String(),
 				decision: Type.Union([Type.Literal("supported"), Type.Literal("refuted"), Type.Literal("killed")]),
-				run_key: Type.Optional(Type.String({ description: "Required for supported; must be verification=verified" })),
+				run_key: Type.Optional(
+					Type.String({ description: "Required for supported; must be verification=verified" }),
+				),
 				note: Type.Optional(Type.String()),
 			}),
 			promptGuidelines: [
@@ -1326,11 +1421,180 @@ export function createLabToolDefinitions(cwd: string): LabToolDef[] {
 			parameters: Type.Object({
 				evaluator_id: Type.String(),
 			}),
-			promptGuidelines: [
-				"评测器审计在 loop 外执行；漏检率非零时，该线的代理指标提升要降权引用。",
-			],
+			promptGuidelines: ["评测器审计在 loop 外执行；漏检率非零时，该线的代理指标提升要降权引用。"],
 			async execute(_id, params) {
 				return json(await auditEvaluator(reg(), cwd, params.evaluator_id));
+			},
+		}),
+
+		// ---------- 群聊评审（council）：executor/auditor/chair 对抗质证，chair 裁决是完成门禁 ----------
+
+		defineTool({
+			name: "lab_council_open",
+			label: "Convene council review",
+			description:
+				"Convene a multi-role adversarial review (council) for one run or one experiment line: auditor cross-examines the executor's evidence in rounds, and the chair issues an approved/rejected verdict. The verdict is the basis of the completion gate — a run cannot be marked completed until a council for it is approved. One open council per run/line at a time.",
+			parameters: Type.Object({
+				line_id: Type.Optional(
+					Type.String({ description: "Bind the council to an experiment line (either this or run_key)" }),
+				),
+				run_key: Type.Optional(
+					Type.String({ description: "Bind the council to one run (either this or line_id)" }),
+				),
+				topic: Type.String({ description: "What is under review: the claims and targets to cross-examine" }),
+				max_rounds: Type.Optional(
+					Type.Number({ description: "Max cross-examination rounds before the council expires (default 3)" }),
+				),
+			}),
+			promptGuidelines: [
+				"实验收尾前先召集 council（lab_council_open），把任务书目标逐项对照；未通过裁决（approved）的 run 不能标 completed。",
+			],
+			async execute(_id, params) {
+				const council = reg().openCouncil({
+					lineId: params.line_id,
+					runKey: params.run_key,
+					topic: params.topic,
+					maxRounds: params.max_rounds,
+				});
+				return json({
+					...council,
+					_next: "auditor 用 lab_council_post 质证（必须带 refs 证据引用），executor 回应；驱动层推进轮次，chair 用 lab_council_verdict 裁决。",
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_council_post",
+			label: "Post council message",
+			description:
+				"Post a message to an open council as the process's declared role (LAB_ROLE, default executor): auditor raises cross-examination questions, executor responds with evidence, chair may clarify. refs must point at verifiable evidence locations (run_key, artifact relative path, claim number, metric name); a challenge without refs counts as an invalid opinion. severity grades the challenge: blocking for auditor findings that make a goal undecidable (data leakage, sample reuse, missing baseline, wrong metric definition, selective reporting) — an approved verdict is mechanically refused while any blocking issue is unanswered; advisory for general observations; note for procedural remarks. Executor responses use note (or omit severity).",
+			parameters: Type.Object({
+				council_id: Type.String(),
+				role: Type.Optional(
+					Type.String({
+						description: "Posting role; defaults to the LAB_ROLE env of this process, else executor",
+					}),
+				),
+				content: Type.String(),
+				refs: Type.Optional(
+					Type.String({
+						description:
+							"JSON string of evidence references: run_key, artifact relative path, claim number, metric name, etc.",
+					}),
+				),
+				severity: Type.Optional(
+					Type.String({
+						description:
+							"blocking | advisory | note. Auditor: blocking for defects that make a goal undecidable (data leakage, sample reuse, missing baseline, wrong metric definition, selective reporting), advisory for general observations, note for procedural remarks. Executor responses: note.",
+					}),
+				),
+			}),
+			promptGuidelines: [
+				"质疑与回应都必须带 refs 证据引用（run_key、工件相对位置、claim 编号、指标名等）；空 refs 的质疑视为无效意见。",
+				"审计员给质疑分级：数据泄漏、样本复用、对照缺失、指标定义错误、选择性上报、评测脚本静默丢弃样本导致成功率虚高等使目标不可判定的缺陷用 severity=blocking，一般性观察用 advisory，程序性说明用 note；executor 回应用 note。",
+				"blocking 质疑在本场 council 内不可解除：它一旦登记，approved 就一定被拒；缺陷成立时按 rejected 打回，修复后新开一场 council 复审。",
+			],
+			async execute(_id, params) {
+				const council = reg().getCouncil(params.council_id);
+				if (!council) return text(`Error: council ${params.council_id} does not exist`);
+				const role = params.role ?? process.env.LAB_ROLE ?? "executor";
+				// 轮次由驱动层推进（bumpCouncilRound）：刚 open 的 council round=0，首轮发言即按第 1 轮入账；工具层不自行加轮次
+				const round = Math.max(1, council.round);
+				const msgId = reg().addCouncilMessage({
+					councilId: params.council_id,
+					round,
+					role,
+					content: params.content,
+					refs: params.refs,
+					severity: params.severity,
+				});
+				return json({
+					message_id: msgId,
+					council: council.id,
+					round,
+					role,
+					severity: params.severity ?? null,
+					_outstanding: outstandingIssues(reg(), params.council_id).length,
+					_blocking: blockingOutstanding(reg(), params.council_id).length,
+					_note: "round 由驱动层推进（bumpCouncilRound），工具层不自行加轮次。存在未决 blocking 质疑时 approved 裁决会被机制层拒绝。",
+				});
+			},
+		}),
+		defineTool({
+			name: "lab_council_read",
+			label: "Read council review",
+			description:
+				"Read council reviews. Without council_id: list all councils (status, bound run/line, topic, round). With council_id: current status plus the full cross-examination transcript rendered from the shared ledger, so every role speaks against the same facts.",
+			parameters: Type.Object({
+				council_id: Type.Optional(Type.String()),
+				limit: Type.Optional(Type.Number({ description: "Max entries when listing (default 20)" })),
+			}),
+			async execute(_id, params) {
+				if (!params.council_id) {
+					const councils = reg()
+						.listCouncils()
+						.slice(0, params.limit ?? 20);
+					if (councils.length === 0) return text("(no councils)");
+					return text(
+						councils
+							.map(
+								(c) =>
+									`${c.id} [${c.status}] round=${c.round}/${c.max_rounds}${c.run_key ? ` run=${c.run_key}` : ""}${c.line_id ? ` line=${c.line_id}` : ""} ${c.topic}${c.verdict_note ? `  verdict: ${c.verdict_note}` : ""}`,
+							)
+							.join("\n"),
+					);
+				}
+				const council = reg().getCouncil(params.council_id);
+				if (!council) return text(`Error: council ${params.council_id} does not exist`);
+				const issues = outstandingIssues(reg(), params.council_id);
+				const blocking = issues.filter((i) => i.severity === "blocking");
+				let header = "";
+				if (issues.length > 0) {
+					header =
+						`未决质疑 ${issues.length} 条（其中 blocking ${blocking.length} 条${blocking.length > 0 ? "：存在 blocking 未决时 approved 被机制层拒绝" : ""}）:\n` +
+						issues.map((i) => `- [R${i.round}]${i.severity ? `[${i.severity}]` : ""} ${i.text}`).join("\n") +
+						"\n\n";
+				}
+				return text(header + renderTranscript(reg(), params.council_id));
+			},
+		}),
+		defineTool({
+			name: "lab_council_verdict",
+			label: "Issue council verdict",
+			description:
+				"Chair-only: close an open council with a verdict. approved releases the run's completion gate (the run can then be marked completed); rejected sends it back for fixes. note must cite concrete evidence (verified run_key, artifact, metric comparison). The approval is enforced at the mechanism layer: once a blocking-severity challenge is registered in a council, that council can never be approved — the verdict is refused with the list of blocking issues; the only exit is rejected, then a fresh council after the fix. Verdicts are final — an approved council cannot be reopened; a rejected one requires a fresh lab_council_open after fixing.",
+			parameters: Type.Object({
+				council_id: Type.String(),
+				verdict: Type.Union([Type.Literal("approved"), Type.Literal("rejected")]),
+				note: Type.String({ description: "Basis for the verdict; must cite concrete evidence" }),
+				refs: Type.Optional(Type.String({ description: "Evidence references backing the verdict (JSON string)" })),
+			}),
+			promptGuidelines: [
+				"chair 专属：approved 放行该 run 的完成标记，rejected 打回修复；note 必须引用具体证据（已复核的 run_key、工件、指标对比）。",
+				"存在未决的 blocking 质疑时 approved 会被机制层拒绝——即使提示词层想放行也无法落账，只能等质疑清零或改判 rejected。",
+			],
+			async execute(_id, params) {
+				// 裁决门禁（机制层，先于账本写入）：approved 只有在阻塞级质疑清零后才能落账
+				if (params.verdict === "approved") {
+					const blocking = blockingOutstanding(reg(), params.council_id);
+					if (blocking.length > 0) {
+						return text(
+							[
+								`Error: council ${params.council_id} 仍有 ${blocking.length} 条未决的阻塞级质疑（severity=blocking），approved 被拒绝。`,
+								"未决阻塞项:",
+								...blocking.map((i) => `- [R${i.round}] msg#${i.msgId}${i.refs ? `（refs: ${i.refs}）` : ""} ${i.text}`),
+								"blocking 质疑在本场 council 内不可解除（执行者回应或任何解除登记都不清零）：质疑成立且缺陷未修复时，唯一出路是 rejected；修复后用 lab_council_open 新开一场评审。",
+							].join("\n"),
+						);
+					}
+				}
+				const council = adjudicate(reg(), params.council_id, params.verdict, params.note, params.refs);
+				return json({
+					...council,
+					_note:
+						council.status === "approved"
+							? "该 run 的完成门禁已放行，可以 lab_update_run status=completed。"
+							: "裁决 rejected：修复问题后重新 lab_council_open 召集评审。",
+				});
 			},
 		}),
 	];

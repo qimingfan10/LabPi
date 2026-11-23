@@ -13,6 +13,15 @@ export {
 	type ProposedQuestion,
 	renderBrief,
 } from "./brief.ts";
+export {
+	adjudicate,
+	blockingOutstanding,
+	type CouncilIssue,
+	expireCouncil,
+	isStalled,
+	outstandingIssues,
+	renderTranscript,
+} from "./council.ts";
 export { detectPython, type PythonRunResult, runPythonScript } from "./eval.ts";
 export { nowIso, shortHash, stableStringify } from "./fingerprint.ts";
 export {
@@ -87,6 +96,8 @@ export {
 	type ArtifactRow,
 	type ClaimInput,
 	type ClaimRow,
+	type CouncilMessageRow,
+	type CouncilRow,
 	type DispatchRow,
 	DEFAULT_LOCK_TTL_MS,
 	type EvaluatorRow,
