@@ -38,6 +38,18 @@ On top of these: resilient LLM calls with endpoint failover and three-way failur
 
 **Governance over agent goodwill.** Ledger entries are append-only: correcting a metric demands a stated reason and keeps the old value as history. Three consecutive failed runs on one line trip the breaker and pause it until someone records what was investigated. Each line carries a lease (execution lock): one writer at a time, renewed on every write, stealable after the holder dies; a unified activity log (`lab_activity`) records every mutation — status changes, metric revisions, verifications, lock transfers, breaker trips. Every evaluation keeps an input snapshot (script copy plus data, environment and git fingerprints), so when the code has moved on the ledger can still answer what actually ran — and a changed script is reported as drift, not as fabricated numbers. The state card shows anomalies only — paused lines, failed verifications, workers awaiting collection, open claims — so normal operation stays in the background.
 
+## Group-chat review architecture
+
+The current architecture and the router + group-chat hybrid it extends:
+
+![LabPi architecture](docs/council-architecture-current.png)
+
+The council layer: executor, auditor and chair processes share one ledger-backed transcript; a blocking finding latches for the whole session, and the chair's verdict gates completion.
+
+![LabPi council architecture](docs/council-architecture-council.png)
+
+[Full interactive diagram](docs/council-architecture.html)
+
 ## What it looks like
 
 ```
