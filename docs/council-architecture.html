@@ -1,0 +1,702 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LabPi Architecture — Current Baseline and Master/Worker + Group-Chat Hybrid Council</title>
+<style>
+  :root {
+    --bg: #0a0e13;
+    --panel: #101821;
+    --panel-2: #0d141c;
+    --line: #1c2a38;
+    --line-soft: #16222e;
+    --text: #dbe6f2;
+    --muted: #7d90a6;
+    --teal: #2dd4bf;
+    --blue: #60a5fa;
+    --amber: #f5b544;
+    --violet: #a78bfa;
+    --red: #f87171;
+    --green: #4ade80;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1200px 600px at 15% -10%, rgba(45,212,191,.08), transparent 60%),
+      radial-gradient(1000px 500px at 90% 0%, rgba(167,139,250,.07), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.7;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  /* ---------- header ---------- */
+  header.hero { padding: 8px 0 26px; border-bottom: 1px solid var(--line); }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .18em;
+    color: var(--teal); text-transform: uppercase;
+  }
+  h1 { font-size: 34px; line-height: 1.3; margin: 10px 0 12px; font-weight: 700; }
+  h1 .thin { color: var(--muted); font-weight: 400; }
+  .lede { color: var(--muted); max-width: 880px; margin: 0; font-size: 15px; }
+  .meta {
+    display: flex; gap: 18px; flex-wrap: wrap; margin-top: 18px;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  .meta b { color: var(--text); font-weight: 600; }
+
+  .half-divider {
+    margin: 56px 0 0; display: flex; align-items: center; gap: 14px;
+    color: var(--muted); font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+  }
+  .half-divider::before, .half-divider::after {
+    content: ""; flex: 1; height: 1px; background: var(--line);
+  }
+
+  /* ---------- nav ---------- */
+  nav.toc {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; gap: 6px; flex-wrap: wrap;
+    padding: 12px 0; margin: 0 0 8px;
+    background: linear-gradient(var(--bg) 70%, transparent);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  nav.toc a {
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+    text-decoration: none; padding: 5px 10px; border: 1px solid var(--line);
+    border-radius: 999px; transition: .18s;
+  }
+  nav.toc a:hover { color: var(--teal); border-color: rgba(45,212,191,.5); }
+  nav.toc a.c { color: var(--violet); }
+  nav.toc a.c:hover { border-color: rgba(167,139,250,.5); }
+
+  /* ---------- section ---------- */
+  section { margin-top: 48px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 12px; color: var(--teal);
+    border: 1px solid rgba(45,212,191,.35); border-radius: 6px; padding: 2px 8px;
+  }
+  .sec-num.c { color: var(--violet); border-color: rgba(167,139,250,.4); }
+  h2 { font-size: 21px; margin: 0; font-weight: 650; }
+  .sec-sub { color: var(--muted); font-size: 13.5px; margin: 0 0 22px 0; }
+
+  /* ---------- tiers ---------- */
+  .tier-stack { display: flex; flex-direction: column; gap: 0; }
+  .tier {
+    border: 1px solid var(--line); background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border-radius: 12px; padding: 16px 18px; position: relative;
+  }
+  .tier.council { border-color: rgba(167,139,250,.35); }
+  .tier.gate { border-color: rgba(245,181,68,.4); }
+  .tier .tag {
+    position: absolute; right: 14px; top: 12px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .12em;
+    color: var(--muted); text-transform: uppercase;
+  }
+  .tier h3 { margin: 0 0 4px; font-size: 16px; }
+  .tier .role { color: var(--muted); font-size: 13px; margin: 0 0 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--mono); font-size: 11.5px; padding: 2px 8px; border-radius: 5px;
+    border: 1px solid var(--line); color: var(--muted); background: #0c131a;
+  }
+  .chip.t { color: var(--teal); border-color: rgba(45,212,191,.3); }
+  .chip.b { color: var(--blue); border-color: rgba(96,165,250,.3); }
+  .chip.a { color: var(--amber); border-color: rgba(245,181,68,.3); }
+  .chip.v { color: var(--violet); border-color: rgba(167,139,250,.3); }
+  .chip.r { color: var(--red); border-color: rgba(248,113,113,.3); }
+  .chip.g { color: var(--green); border-color: rgba(74,222,128,.3); }
+
+  .arrow-down { text-align: center; color: var(--line); font-size: 20px; line-height: 24px; padding: 6px 0; }
+  .arrow-down span {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px dashed var(--line); padding: 1px 8px; border-radius: 4px; background: #0b1118;
+  }
+  .arrow-down code { font-family: var(--mono); color: var(--teal); font-size: 11px; }
+  .arrow-down.violet span { color: var(--violet); border-color: rgba(167,139,250,.35); }
+
+  /* ---------- grid & cards ---------- */
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+  .card {
+    border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  }
+  .card h4 { margin: 0 0 10px; font-size: 14.5px; display: flex; align-items: center; gap: 8px; }
+  .card h4 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); flex: none; }
+  .card h4 .dot.b { background: var(--blue); }
+  .card h4 .dot.a { background: var(--amber); }
+  .card h4 .dot.v { background: var(--violet); }
+  .card h4 .dot.r { background: var(--red); }
+  .card ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+  .card li { margin: 5px 0; }
+  .card code, .mono, code {
+    font-family: var(--mono); font-size: 11.5px; color: var(--teal);
+    background: #0c131a; border: 1px solid var(--line-soft); border-radius: 4px; padding: 0 4px;
+  }
+  .card li b { color: var(--text); font-weight: 600; }
+
+  /* ---------- hook points ---------- */
+  .hooks { display: flex; flex-direction: column; gap: 0; }
+  .hook {
+    display: grid; grid-template-columns: 130px 1fr; gap: 14px; align-items: start;
+    padding: 12px 0; border-bottom: 1px dashed var(--line);
+  }
+  .hook:last-child { border-bottom: 0; }
+  .hook .loc {
+    font-family: var(--mono); font-size: 11px; color: var(--bg); background: var(--teal);
+    border-radius: 5px; text-align: center; padding: 2px 0; font-weight: 700;
+  }
+  .hook:nth-child(2) .loc { background: var(--blue); }
+  .hook:nth-child(3) .loc { background: var(--violet); }
+  .hook h5 { margin: 0 0 3px; font-size: 13.5px; }
+  .hook p { margin: 0; color: var(--muted); font-size: 12.5px; }
+
+  /* ---------- table grid ---------- */
+  .tbl-list { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  @media (max-width: 900px) { .tbl-list { grid-template-columns: repeat(2, 1fr); } }
+  .tbl {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text);
+    background: #0c131a; border: 1px solid var(--line); border-radius: 5px; padding: 3px 7px;
+  }
+  .tbl.new { color: var(--violet); border-color: rgba(167,139,250,.4); }
+  .tbl i { color: var(--muted); font-style: normal; font-size: 10px; display: block; }
+
+  /* ---------- council round ---------- */
+  .round-loop {
+    border: 1px dashed rgba(167,139,250,.4); border-radius: 12px;
+    padding: 14px 16px 16px; margin-top: 12px; position: relative;
+    background: rgba(167,139,250,.03);
+  }
+  .round-loop .loop-tag {
+    position: absolute; top: -11px; left: 16px;
+    font-family: var(--mono); font-size: 11px; color: var(--violet);
+    background: var(--bg); padding: 0 8px; border: 1px solid rgba(167,139,250,.4); border-radius: 6px;
+  }
+  .roles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  @media (max-width: 900px) { .roles { grid-template-columns: 1fr; } }
+  .role-card {
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px;
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+  }
+  .role-card h5 { margin: 0 0 4px; font-size: 13.5px; display: flex; align-items: center; gap: 7px; }
+  .role-card .r-env { font-family: var(--mono); font-size: 10.5px; color: var(--muted); margin-bottom: 8px; }
+  .role-card p { margin: 0; font-size: 12px; color: var(--muted); }
+  .role-card .act {
+    margin-top: 8px; font-family: var(--mono); font-size: 11px;
+    border-top: 1px dashed var(--line); padding-top: 8px;
+  }
+  .role-card.rc-exec h5 { color: var(--teal); }
+  .role-card.rc-audit h5 { color: var(--blue); }
+  .role-card.rc-chair h5 { color: var(--amber); }
+  .role-card .act .to { color: var(--muted); }
+  .role-card .act .fn { color: var(--text); }
+
+  .shared-rec {
+    margin-top: 12px; border: 1px solid var(--line); border-radius: 8px;
+    background: #0c131a; padding: 8px 12px;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  }
+  .shared-rec b { color: var(--text); font-weight: 600; }
+
+  .verdict-bar {
+    margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    font-family: var(--mono); font-size: 12px; color: var(--muted);
+  }
+  .verdict-bar .pill {
+    font-size: 11px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line);
+  }
+  .pill.g { color: var(--green); border-color: rgba(74,222,128,.35); }
+  .pill.r { color: var(--red); border-color: rgba(248,113,113,.35); }
+  .pill.y { color: var(--amber); border-color: rgba(245,181,68,.35); }
+
+  /* ---------- matrix ---------- */
+  .matrix-wrap { overflow-x: auto; }
+  table.matrix { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 12.5px; }
+  table.matrix th, table.matrix td {
+    border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top;
+  }
+  table.matrix th {
+    background: #0c131a; font-size: 12px; font-weight: 600; color: var(--text);
+  }
+  table.matrix th.col-exec { color: var(--teal); border-bottom: 2px solid rgba(45,212,191,.4); }
+  table.matrix th.col-audit { color: var(--blue); border-bottom: 2px solid rgba(96,165,250,.4); }
+  table.matrix th.col-chair { color: var(--amber); border-bottom: 2px solid rgba(245,181,68,.4); }
+  table.matrix td.tool { font-family: var(--mono); font-size: 11.5px; color: var(--text); white-space: nowrap; }
+  table.matrix td .yes { color: var(--green); font-family: var(--mono); font-size: 11.5px; }
+  table.matrix td .no { color: var(--red); font-family: var(--mono); font-size: 11.5px; }
+  table.matrix td .cond { color: var(--amber); font-family: var(--mono); font-size: 11.5px; }
+  table.matrix td .note { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+
+  /* ---------- emphasis ---------- */
+  .emph {
+    border: 1px solid rgba(96,165,250,.35); border-radius: 12px;
+    background: linear-gradient(180deg, rgba(96,165,250,.07), transparent);
+    padding: 16px 18px; margin-top: 18px;
+  }
+  .emph h4 { margin: 0 0 8px; font-size: 14.5px; color: var(--blue); display: flex; align-items: center; gap: 8px; }
+  .emph h4 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); flex: none; }
+  .emph p { margin: 0; color: var(--muted); font-size: 13px; }
+  .emph p b { color: var(--text); }
+  .emph .src { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .emph .src .chip { border-color: rgba(96,165,250,.35); color: var(--blue); }
+  .emph .src .chip.dim { color: var(--muted); border-color: var(--line); }
+
+  /* ---------- state machine ---------- */
+  .state-svg { width: 100%; height: auto; display: block; }
+  .state-svg text { font-family: var(--mono); }
+  .state-note { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+
+  footer {
+    margin-top: 60px; padding-top: 20px; border-top: 1px solid var(--line);
+    color: var(--muted); font-size: 12px; font-family: var(--mono);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="eyebrow">LabPi Architecture · Baseline &rarr; Council</div>
+  <h1>Current Module Architecture and Master/Worker + Group-Chat Hybrid Architecture <span class="thin">One ledger, two layers of evolution</span></h1>
+  <p class="lede">
+    The upper half is the lab/rsi baseline: skill-layer dispatch, the coding-agent runtime mounting gates, and the packages/lab ledger core.
+    The lower half is the council layer now being implemented: on top of master/worker dispatch it stacks round-by-round group-chat adjudication;
+    the completed state is released by the council's approved verdict, fail-closed.
+  </p>
+  <div class="meta">
+    <span><b>skill layer</b> labpi.mjs · 10 subcommands</span>
+    <span><b>runtime</b> pi-mono · agent-session.ts</span>
+    <span><b>ledger</b> &lt;project&gt;/runs/lab.db (node:sqlite · WAL · busy_timeout 10s)</span>
+  </div>
+</header>
+
+<nav class="toc">
+  <a href="#skill">01 skill layer</a>
+  <a href="#runtime">02 runtime mount points</a>
+  <a href="#ledger">03 ledger core</a>
+  <a href="#gates">04 gates and precedent</a>
+  <a class="c" href="#council">05 council flow</a>
+  <a class="c" href="#matrix">06 role permission matrix</a>
+  <a class="c" href="#state">07 state machine</a>
+</nav>
+
+<!-- ==================================================== -->
+<!-- Upper half: current architecture                      -->
+<!-- ==================================================== -->
+
+<!-- ================= 01 ================= -->
+<section id="skill">
+  <div class="sec-head"><span class="sec-num">01</span><h2>skill layer · labpi.mjs</h2></div>
+  <p class="sec-sub">The single entry point for callers: subcommands layered by responsibility — read the ledger read-only, probe the gateway for liveness, dispatch headless processes, isolate worktrees.</p>
+
+  <div class="tier">
+    <span class="tag">Skill Interface</span>
+    <h3>labpi.mjs — 10 subcommands</h3>
+    <p class="role">Read-only access to runs/lab.db; gateway liveness probe; spawn headless pi processes; worktree-isolated execution environments.</p>
+    <div class="chips">
+      <span class="chip t">init</span>
+      <span class="chip t">fork</span>
+      <span class="chip t">dispatch</span>
+      <span class="chip t">collect</span>
+      <span class="chip t">verify</span>
+      <span class="chip b">hypotheses</span>
+      <span class="chip b">cycle</span>
+      <span class="chip b">review</span>
+      <span class="chip b">progress</span>
+      <span class="chip b">worktree-clean</span>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <span>spawn: <code>cli.js --session-id &lt;line&gt;-main --append-system-prompt &lt;discipline&gt; -p &lt;task brief&gt;</code></span>
+    <div>▼</div>
+  </div>
+  <div class="arrow-down" style="padding-top:0">
+    <span>env: <code>LAB_LINE_ID</code> · <code>LAB_NO_SPAWN</code> · <code>LAB_RUNS_ROOT</code> · <code>LAB_HYPOTHESIS_ID</code></span>
+    <div>▼</div>
+  </div>
+
+  <div class="tier">
+    <span class="tag">Runtime</span>
+    <h3>coding-agent runtime — one headless pi process per dispatch (roughly 80 MB resident)</h3>
+    <p class="role">Mounts lab tools and gates inside the process, entering the three mount points in 02; writes evidence into the ledger in 03.</p>
+    <div class="chips">
+      <span class="chip a">independent session</span>
+      <span class="chip a">independent cwd</span>
+      <span class="chip a">lab_* tool surface</span>
+      <span class="chip r">LAB_NO_SPAWN forbids further spawning</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 02 ================= -->
+<section id="runtime">
+  <div class="sec-head"><span class="sec-num">02</span><h2>runtime mount points · agent-session.ts</h2></div>
+  <p class="sec-sub">Three mount points in execution order: gates run before the extension runner, the state card is regenerated before each conversation round, and the tool surface is registered once and available process-wide.</p>
+
+  <div class="card">
+    <div class="hooks">
+      <div class="hook">
+        <div class="loc">:680</div>
+        <div>
+          <h5>labBeforeToolCheck — tool-call gate</h5>
+          <p>Runs before the extension runner and intercepts violations: cross-line writes, ledger writes without holding the lock, illegal state transitions. The council layer's completion gate adds a new branch here (see 05).</p>
+        </div>
+      </div>
+      <div class="hook">
+        <div class="loc">:1814</div>
+        <div>
+          <h5>transformContext — state-card injection</h5>
+          <p>Regenerates the state card before every conversation round, anomalies first: breaker-tripped lines, mismatches, workers awaiting collection and open claims lead; normal state is folded into a single background line. Rebuilt every round, it naturally resists context compression.</p>
+        </div>
+      </div>
+      <div class="hook">
+        <div class="loc">:3724</div>
+        <div>
+          <h5>createLabToolDefinitions — register lab_* tools</h5>
+          <p>Registers all lab_* tool definitions once; the process-wide visible tool surface is decided here, and the council's new lab_council_post and lab_council_verdict hang in the same place.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 03 ================= -->
+<section id="ledger">
+  <div class="sec-head"><span class="sec-num">03</span><h2>ledger core · packages/lab</h2></div>
+  <p class="sec-sub">node:sqlite, WAL mode, busy_timeout 10s. One ledger per project; all evidence and state have exactly one place to land.</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="dot"></span>store.ts — 14 tables</h4>
+      <div class="tbl-list" style="margin-top:4px">
+        <div class="tbl">lines<i>experiment lines and lineage</i></div>
+        <div class="tbl">runs<i>rounds and status</i></div>
+        <div class="tbl">metrics<i>metrics and revision chain</i></div>
+        <div class="tbl">artifacts<i>artifacts and checksums</i></div>
+        <div class="tbl">claims<i>claims and evidence</i></div>
+        <div class="tbl">workers<i>routing and processes</i></div>
+        <div class="tbl">line_locks<i>execution locks and leases</i></div>
+        <div class="tbl">activity<i>full change trail</i></div>
+        <div class="tbl">hypotheses<i>direction hypotheses</i></div>
+        <div class="tbl">novelty_checks<i>novelty checks</i></div>
+        <div class="tbl">questions<i>open questions</i></div>
+        <div class="tbl">evaluators<i>evaluators</i></div>
+        <div class="tbl">anchors<i>anchors</i></div>
+        <div class="tbl">dispatches<i>dispatch records</i></div>
+      </div>
+      <p class="mono" style="margin:12px 0 0;color:var(--muted);font-size:11px">
+        The council layer adds two tables: councils and council_messages (see 05).
+      </p>
+    </div>
+
+    <div class="tier-stack">
+      <div class="card">
+        <h4><span class="dot b"></span>Verification ladder</h4>
+        <ul>
+          <li><b>verify.ts</b>: RESULT_JSON reconciliation — rerun the same command independently and compare values item by item</li>
+          <li><b>snapshot.ts</b>: four kinds of records — script, data, environment and git snapshot; drift detection compares environment fingerprints between rounds</li>
+        </ul>
+      </div>
+      <div class="arrow-down"><div>▼</div></div>
+      <div class="card">
+        <h4><span class="dot a"></span>Statistics and direction layer</h4>
+        <ul>
+          <li><b>stats.ts</b>: Wilcoxon exact enumeration + paired t-test</li>
+          <li><b>compare.ts</b>: cross-endpoint isolated pairing; endpoint differences never enter the same pairing group</li>
+          <li><b>hypothesis.ts / brief.ts / novelty.ts / progress.ts / audit.ts</b>: direction hypothesis, task brief, novelty, progress and audit each stand as an independent module</li>
+        </ul>
+      </div>
+      <div class="arrow-down"><div>▼</div></div>
+      <div class="card">
+        <h4><span class="dot v"></span>Orchestration layer</h4>
+        <ul>
+          <li><b>worker.ts</b>: one worker process per direction, line lock + heartbeat lease, single writer</li>
+          <li><b>resilient.ts</b>: endpoint liveness failover, three-way failure classification, transparent switching for the caller</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 04 ================= -->
+<section id="gates">
+  <div class="sec-head"><span class="sec-num">04</span><h2>gate checklist and multi-role precedent</h2></div>
+  <p class="sec-sub">completed is not a free state: it is released only when every machine-verifiable condition passes; multi-process collaboration already has precedent in the review subcommand.</p>
+
+  <div class="grid-2">
+    <div class="card">
+      <h4><span class="dot r"></span>completed gate checklist (labBeforeToolCheck)</h4>
+      <ul>
+        <li><b>metrics</b>: at least one metric on the run; a run completed out of thin air is rejected</li>
+        <li><b>verified</b>: a run with a registered eval_spec must pass re-verification; a mismatch blocks permanently</li>
+        <li><b>non-drift</b>: when snapshot comparison detects environment drift, completion is refused</li>
+        <li><b>revise_reason</b>: rewriting a metric of the same name must carry a revision reason; a missing reason is refused</li>
+        <li><b>breaker</b>: while a line is paused, registration and dispatch are all refused; resume first, then execute</li>
+        <li><b>council approved</b>: added once the council layer ships (see 05, fail-closed)</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4><span class="dot v"></span>multi-role precedent · review subcommand</h4>
+      <ul>
+        <li><b>generator / critic / ranker</b> three kinds of processes run concurrently, each in its own session</li>
+        <li><b>no shared conversation</b>: processes exchange information only through the ledger and artifacts; one party's output is an invisible narrative to another</li>
+        <li><b>non-blocking</b>: the three kinds of processes never wait for each other; the skill layer aggregates once all have finished</li>
+        <li>the council layer reuses this concurrency model, upgrading "one-shot review" to "multi-round adversarial review + adjudication"</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<div class="half-divider">Lower half · COUNCIL LAYER (in progress)</div>
+
+<!-- ==================================================== -->
+<!-- Lower half: master/worker + group-chat hybrid         -->
+<!-- ==================================================== -->
+
+<!-- ================= 05 ================= -->
+<section id="council">
+  <div class="sec-head"><span class="sec-num c">05</span><h2>council layer · master/worker + group-chat hybrid</h2></div>
+  <p class="sec-sub">The master/worker layer stays as is: router dispatches, worker executes. The change happens at acceptance — once run evidence is complete, round-by-round group-chat adjudication begins, the chair gives a verdict, and the completion gate releases per fail-closed.</p>
+
+  <div class="tier-stack">
+    <div class="tier">
+      <span class="tag">Router</span>
+      <h3>router — skill dispatch (master/worker layer, unchanged)</h3>
+      <p class="role">Dispatch and collection logic keep baseline behavior: write the task brief, dispatch, collect.</p>
+      <div class="chips">
+        <span class="chip t">dispatch</span>
+        <span class="chip t">collect</span>
+        <span class="chip r">takes no part in adjudication</span>
+      </div>
+    </div>
+
+    <div class="arrow-down">
+      <span>the worker process finishes its experiments; the run is in the <b style="color:var(--amber)">evidence-complete, awaiting acceptance</b> state</span>
+      <div>▼</div>
+    </div>
+
+    <div class="tier council">
+      <span class="tag">Council</span>
+      <h3>council convening — new skill subcommand council</h3>
+      <p class="role">The shared transcript lands in the ledger: new lab.db tables councils + council_messages. Each round cycles three role processes, each with an independent session, writing into the transcript through tools.</p>
+
+      <div class="round-loop">
+        <span class="loop-tag">per-round loop</span>
+        <div class="roles">
+          <div class="role-card rc-exec">
+            <h5><span class="chip t" style="font-size:10px">LAB_ROLE=executor</span> executor process</h5>
+            <div class="r-env">the executing side, defending in person</div>
+            <p>Reports the evidence chain: metrics, verification results, artifact locations; responds point by point to the auditor's challenges.</p>
+            <div class="act"><span class="to">──▶ </span><span class="fn">lab_council_post</span><span class="to"> ──▶ transcript</span></div>
+          </div>
+          <div class="role-card rc-audit">
+            <h5><span class="chip b" style="font-size:10px">LAB_ROLE=auditor</span> auditor process</h5>
+            <div class="r-env">independent cross-examination</div>
+            <p>Read-only over the ledger and artifacts; challenges item by item: does the evidence cover the conclusion, does verification reconcile, has the snapshot drifted.</p>
+            <div class="act"><span class="to">──▶ </span><span class="fn">lab_council_post</span><span class="to"> ──▶ transcript</span></div>
+          </div>
+          <div class="role-card rc-chair">
+            <h5><span class="chip a" style="font-size:10px">LAB_ROLE=chair</span> chair process</h5>
+            <div class="r-env">adjudicator</div>
+            <p>Reads the transcript and ledger, synthesizes both sides' presentations into a verdict; at most one verdict per round.</p>
+            <div class="act"><span class="to">──▶ </span><span class="fn">lab_council_verdict</span><span class="to"> ──▶ approved / rejected</span></div>
+          </div>
+        </div>
+
+        <div class="shared-rec">
+          <b>shared transcript</b>
+          <span>lab.db · councils</span>
+          <span>lab.db · council_messages</span>
+          <span style="color:var(--muted)">the three processes' independent sessions meet here; between processes the transcript is read-only</span>
+        </div>
+
+        <div class="verdict-bar">
+          <span>chair verdict →</span>
+          <span class="pill g">approved → released</span>
+          <span class="pill r">rejected → the run can never be marked completed (fixes allow a new council to be convened)</span>
+          <span class="pill y">expired (rounds exhausted) → likewise closes that run's completed channel</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="arrow-down violet">
+      <span>the verdict is written back to the ledger; the completion gate decides on it</span>
+      <div>▼</div>
+    </div>
+
+    <div class="tier gate">
+      <span class="tag">Completion Gate</span>
+      <h3>completion gate — new branch in labBeforeToolCheck, fail-closed</h3>
+      <p class="role">
+        <code style="color:var(--amber)">lab_update_run status=completed</code> requires an approved council covering this run;
+        when the condition is missing the call is refused, and refusal is the gate's default behavior.
+      </p>
+      <div class="chips">
+        <span class="chip a">query the councils table</span>
+        <span class="chip a">covers this run</span>
+        <span class="chip a">status = approved</span>
+        <span class="chip r">no approved → refuse</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="emph">
+    <h4><span class="dot"></span>the auditor's sources of fact</h4>
+    <p>
+      The auditor's sources of fact are <b>only</b> three: the ledger, artifact files, and independent re-verification results; the executor's narrative serves solely as accusatory material —
+      a narrative may point out the direction of a challenge, but whether the challenge holds must be verified against the three sources.
+      This constraint is written into the auditor's discipline prefix, in the same line as the review precedent's "no shared conversation".
+    </p>
+    <div class="src">
+      <span class="chip">ledger · lab.db</span>
+      <span class="chip">artifact files · artifacts + checksums</span>
+      <span class="chip">independent re-verification · verify / snapshot</span>
+      <span class="chip dim">executor narrative · accusatory material only</span>
+    </div>
+  </div>
+</section>
+
+<!-- ================= 06 ================= -->
+<section id="matrix">
+  <div class="sec-head"><span class="sec-num c">06</span><h2>role permission matrix</h2></div>
+  <p class="sec-sub">The tool surface narrows by role: executor keeps all ledger writes, auditor is read-only plus cross-examination, chair has exactly one outlet — the verdict. Permissions are filtered by LAB_ROLE in createLabToolDefinitions.</p>
+
+  <div class="matrix-wrap">
+    <table class="matrix">
+      <thead>
+        <tr>
+          <th style="width:32%">Tool group</th>
+          <th class="col-exec">executor<span style="display:block;font-weight:400;color:var(--muted);font-size:11px">LAB_ROLE=executor</span></th>
+          <th class="col-audit">auditor<span style="display:block;font-weight:400;color:var(--muted);font-size:11px">LAB_ROLE=auditor</span></th>
+          <th class="col-chair">chair<span style="display:block;font-weight:400;color:var(--muted);font-size:11px">LAB_ROLE=chair</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="tool">lab_query_* / activity / collect read-only surface</td>
+          <td><span class="yes">✓ allowed</span></td>
+          <td><span class="yes">✓ allowed</span><span class="note">source of evidence for challenges</span></td>
+          <td><span class="yes">✓ allowed</span></td>
+        </tr>
+        <tr>
+          <td class="tool">lab_register_run / record_metric / record_claim and other ledger writes</td>
+          <td><span class="yes">✓ allowed</span><span class="note">same as baseline, bound by existing gates</span></td>
+          <td><span class="no">✗ denied</span></td>
+          <td><span class="no">✗ denied</span></td>
+        </tr>
+        <tr>
+          <td class="tool">lab_council_post — write to the transcript</td>
+          <td><span class="yes">✓ allowed</span><span class="note">report the evidence chain, respond to challenges</span></td>
+          <td><span class="yes">✓ allowed</span><span class="note">challenge item by item</span></td>
+          <td><span class="no">✗ denied</span><span class="note">the adjudicator does not appear in the conversation record</span></td>
+        </tr>
+        <tr>
+          <td class="tool">lab_council_verdict — submit a verdict</td>
+          <td><span class="no">✗ denied</span></td>
+          <td><span class="no">✗ denied</span></td>
+          <td><span class="yes">✓ allowed</span><span class="note">at most once per round, approved / rejected</span></td>
+        </tr>
+        <tr>
+          <td class="tool">lab_update_run status=completed</td>
+          <td><span class="cond">△ conditional</span><span class="note">an approved council covering this run exists</span></td>
+          <td><span class="no">✗ denied</span></td>
+          <td><span class="no">✗ denied</span></td>
+        </tr>
+        <tr>
+          <td class="tool">spawn / worktree class derived actions</td>
+          <td><span class="no">✗ denied</span><span class="note">council processes never spawn further</span></td>
+          <td><span class="no">✗ denied</span></td>
+          <td><span class="no">✗ denied</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ================= 07 ================= -->
+<section id="state">
+  <div class="sec-head"><span class="sec-num c">07</span><h2>council state machine</h2></div>
+  <p class="sec-sub">One council record per convening; state transitions follow the chair's verdict. After rejected, fixing the issues allows a new convening, but the original run's completed channel stays closed until an approved exists.</p>
+
+  <div class="card">
+    <svg class="state-svg" viewBox="0 0 980 320" role="img" aria-label="council state machine: open to approved, rejected, expired">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#7d90a6"/>
+        </marker>
+        <marker id="arrV" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa"/>
+        </marker>
+      </defs>
+
+      <!-- open -->
+      <rect x="40" y="120" width="150" height="64" rx="12" fill="#101821" stroke="#a78bfa" stroke-width="1.5"/>
+      <text x="115" y="147" text-anchor="middle" fill="#dbe6f2" font-size="15" font-weight="600">open</text>
+      <text x="115" y="168" text-anchor="middle" fill="#7d90a6" font-size="10.5">round 1 starts cross-examination</text>
+
+      <!-- open -> approved -->
+      <line x1="190" y1="140" x2="360" y2="80" stroke="#7d90a6" stroke-width="1.2" marker-end="url(#arr)"/>
+      <text x="268" y="92" text-anchor="middle" fill="#4ade80" font-size="11">lab_council_verdict</text>
+      <text x="268" y="107" text-anchor="middle" fill="#7d90a6" font-size="10.5">chair: approved</text>
+
+      <!-- open -> rejected -->
+      <line x1="190" y1="165" x2="360" y2="225" stroke="#7d90a6" stroke-width="1.2" marker-end="url(#arr)"/>
+      <text x="268" y="212" text-anchor="middle" fill="#f87171" font-size="11">lab_council_verdict</text>
+      <text x="268" y="227" text-anchor="middle" fill="#7d90a6" font-size="10.5">chair: rejected</text>
+
+      <!-- open -> expired -->
+      <line x1="190" y1="152" x2="360" y2="152" stroke="#7d90a6" stroke-width="1.2" marker-end="url(#arr)"/>
+      <text x="275" y="146" text-anchor="middle" fill="#f5b544" font-size="10.5">rounds exhausted</text>
+
+      <!-- approved -->
+      <rect x="365" y="46" width="170" height="64" rx="12" fill="rgba(74,222,128,.06)" stroke="#4ade80" stroke-width="1.5"/>
+      <text x="450" y="73" text-anchor="middle" fill="#4ade80" font-size="15" font-weight="600">approved</text>
+      <text x="450" y="94" text-anchor="middle" fill="#7d90a6" font-size="10.5">gate releases completed</text>
+
+      <!-- rejected -->
+      <rect x="365" y="196" width="170" height="64" rx="12" fill="rgba(248,113,113,.06)" stroke="#f87171" stroke-width="1.5"/>
+      <text x="450" y="223" text-anchor="middle" fill="#f87171" font-size="15" font-weight="600">rejected</text>
+      <text x="450" y="244" text-anchor="middle" fill="#7d90a6" font-size="10.5">reconvene after fixes</text>
+
+      <!-- expired -->
+      <rect x="365" y="120" width="170" height="64" rx="12" fill="rgba(245,181,68,.06)" stroke="#f5b544" stroke-width="1.5"/>
+      <text x="450" y="147" text-anchor="middle" fill="#f5b544" font-size="15" font-weight="600">expired</text>
+      <text x="450" y="168" text-anchor="middle" fill="#7d90a6" font-size="10.5">max_rounds used up</text>
+
+      <!-- rejected -> open (reconvene) -->
+      <path d="M 450 260 C 450 300, 250 300, 140 188" fill="none" stroke="#a78bfa" stroke-width="1.3" stroke-dasharray="5 4" marker-end="url(#arrV)"/>
+      <text x="290" y="303" text-anchor="middle" fill="#a78bfa" font-size="11">new council subcommand reconvenes (fresh round)</text>
+
+      <!-- terminal note -->
+      <rect x="620" y="90" width="320" height="150" rx="12" fill="#0c131a" stroke="#1c2a38"/>
+      <text x="644" y="122" fill="#dbe6f2" font-size="12.5" font-weight="600">Terminal-state semantics</text>
+      <text x="644" y="150" fill="#7d90a6" font-size="11">approved → completion gate releases; run may be completed</text>
+      <text x="644" y="172" fill="#7d90a6" font-size="11">rejected → the run can never be marked completed,</text>
+      <text x="656" y="190" fill="#7d90a6" font-size="11">until a new council returns approved</text>
+      <text x="644" y="214" fill="#7d90a6" font-size="11">expired → same effect as rejected; completed channel closed</text>
+    </svg>
+    <p class="state-note">
+      State lands in the councils table; every council_message carries a round number and a role; the whole process is traceable in the activity table.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>LabPi · packages/lab (14 tables + councils / council_messages) · pi-mono kernel · agent-session.ts :680 / :1814 / :3724</div>
+  <div style="margin-top:6px">Upper · baseline lab/rsi &nbsp;|&nbsp; Lower · council layer (in progress): master/worker dispatch + group-chat adjudication + fail-closed completion gate</div>
+</footer>
+
+</div>
+</body>
+</html>

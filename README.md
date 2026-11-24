@@ -13,7 +13,7 @@
 
 **LabPi turns [pi](https://github.com/badlogic/pi-mono) — one of the most starred open-source coding agents — into a research-experiment superagent.** It follows the router/worker orchestration ideas DeepSeek open-sourced in [dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype), but instead of managing code repositories, LabPi manages **experiments**: every run has a ledger entry, every conclusion carries evidence, parallel directions get their own isolated worker processes, and "it works" is something a statistical test has to sign off on.
 
-> 科研版 superagent：在 pi 内核之上实现 DeepSeek dsh-superagent 原型的 router/worker 编排思想——多方向实验并行编排、结论必须携带证据、判断立字据可被推翻。
+> A research-grade superagent: the router/worker orchestration ideas of DeepSeek's dsh-superagent prototype, implemented on top of the pi kernel — parallel orchestration of multiple experiment directions, conclusions that must carry evidence, and claims written down so they can be overturned.
 
 ## The problem it solves
 

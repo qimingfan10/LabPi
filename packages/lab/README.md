@@ -2,45 +2,45 @@
 
 Research experiment discipline for pi: experiment ledger, evidence-linked claims, completion gates, paired statistics, task pools, and router/worker orchestration.
 
-## Router/worker 编排（吸收自 dsh-superagent-prototype）
+## Router/worker orchestration (absorbed from dsh-superagent-prototype)
 
-多方向实验的两个老问题——方向多了管理不过来、不同方向的数据混在一起——由四个机制解决：
+Two long-standing problems of multi-direction experiments — too many directions to manage, and data from different directions mixed together — are solved by four mechanisms:
 
-1. **每方向一个 worker 进程**：`lab_worker_spawn` 为一条实验线派生一个 headless pi 进程（独立会话与目录），绑定该线并锁定账本写入——串线在接口层被拒绝，单一写入者保证数据不混杂。
-2. **router 只路由不执行**：主会话派生 worker 后继续自己的工作，worker 结束把报告回传账本；`lab_worker_collect` 收取报告与该线生命周期内的账本增量，router 据此决定采纳、再派生或放弃。
-3. **并发无内建上限**：同时活跃的 worker 数由机器与网关承载决定；需要限流时由调用方显式传 maxWorkers。
-4. **waitsForPerson**：需要人决策或环境不可用的 worker 如实落 failed 并回传原因，等待 router 裁定，禁止编造数据。
+1. **One worker process per direction**: `lab_worker_spawn` forks a headless pi process for an experiment line (independent session and directory), binds it to that line and locks ledger writes to it — cross-line writes are rejected at the interface layer, and the single writer keeps data from mixing.
+2. **The router routes, it does not execute**: after spawning a worker the main session continues its own work; when the worker finishes it reports back into the ledger. `lab_worker_collect` collects the report together with the ledger delta across that line's lifetime, and the router decides on that basis whether to adopt, spawn again, or abandon.
+3. **No built-in concurrency cap**: the number of simultaneously active workers is bounded by what the machine and the gateway can carry; when throttling is needed the caller passes maxWorkers explicitly.
+4. **waitsForPerson**: a worker that needs a human decision or faces an unusable environment files an honest `failed` with the reason and waits for the router's ruling; fabricating data is forbidden.
 
-状态卡每轮注入活跃 worker 与待收取清单；交互模式内 `/workers` 命令展示路由视图。worker 内禁止再派生 worker（`LAB_NO_SPAWN`），编排只有一层。
+The state card injects the active workers and the collection backlog every round; in interactive mode the `/workers` command shows the routing view. A worker may not spawn further workers (`LAB_NO_SPAWN`) — orchestration has exactly one layer.
 
-## 治理：验收阶梯、独立复核、不可逆与熔断
+## Governance: verification ladder, independent re-verification, irreversibility, and breaker
 
-科研账本最怕两件事：执行者自己给自己打分，以及失败被反复重试掩盖。四个机制对应四条教训：
+A research ledger fears two things most: the executor grading its own work, and failures being repeatedly retried until they are buried. Four mechanisms answer four lessons:
 
-1. **验收阶梯，机器先于模型**：评测脚本自己输出的结构化结果（`RESULT_JSON`）→ 与账本逐项比对（容差内）→ 配对显著性检验 → 判断。机器能验证的环节不交给 LLM 判断。
-2. **独立复核（选手不当裁判）**：`lab_eval_run_python` 执行成功即登记复现命令；`lab_verify_run` 用脚本重跑一遍，把重跑数值与账本指标比对。对不上落 `mismatch`，该 run 在复核通过前不能被标完成。没有复现命令的 run 要标完成，必须声明 `evidence_class="manual"` 并在 note 写明证据来源，账本以 `unverified` 永久标记——允许人工路径存在，但不允许它伪装成脚本证据。
-3. **账本不可覆盖**：同名指标重复写入必须提供 `revise_reason`，旧值保留为历史版本（`revision` + `superseded_by`），默认查询只看当前生效版本。
-4. **连续失败熔断**：同一实验线累计 3 次 failed 自动置为 `paused`，登记新 run 与派生 worker 均被拒绝，需 `lab_line_resume` 说明已排查什么才恢复。状态卡只报需要处理的事项（熔断线、复核不一致、待收取 worker、未决判断），正常状态折叠成一行。
-5. **执行锁**：同一实验线同时只允许一个进程写入。`registerRun` 自动占线（持有者为本进程 pid），同进程重入即续期；其他进程占线未过期时被拒，并给出持有者与心跳时间；进程死亡后租期（默认 90 分钟）到期可被接管。run 进入终态且线内无进行中 worker 时自动释放，也可 `forceReleaseLineLock` 人工清理。跨进程并行因此只能跨线，不能同线。
-6. **活动日志**：账本每次变更写一条 `activity`：创建/分叉线、登记 run、状态流转、指标记录与修订、工件挂载、判断增删与裁定、复核结论、worker 存亡、锁的获取/接管/释放、熔断触发。`lab_activity` 按线、run、动作类型查询，用于排障与写实验记录。
-7. **输入快照与漂移检测**：`lab_eval_run_python` 成功即把评测脚本复制到 `runs/<run_key>/snapshot/src/`，并记录脚本 sha256、数据文件哈希、Python 环境指纹（解释器 + pip freeze 哈希）与 git 状态（commit + 未提交改动），清单写入 `snapshot/manifest.json`。复核前先比对当前脚本哈希与登记值：不一致落 `drift`（代码已漂移，重跑不可比），而不是误判为数据造假；哈希一致时优先用快照副本重跑。漂移的 run 不能标完成，状态卡与 collect 均会提示。
+1. **Verification ladder, machines before models**: the evaluator script's own structured output (`RESULT_JSON`) → item-by-item comparison against the ledger (within tolerance) → paired significance testing → judgement. Whatever a machine can verify is never handed to an LLM to decide.
+2. **Independent re-verification (the player does not referee)**: a successful `lab_eval_run_python` registers its reproduction command; `lab_verify_run` reruns the script and compares the rerun values against the ledger metrics. A discrepancy lands as `mismatch`, and that run cannot be marked complete before re-verification passes. A run with no reproduction command that wants to be marked complete must declare `evidence_class="manual"` and state the evidence source in the note; the ledger stamps it `unverified` permanently — a manual path is allowed to exist, but it is never allowed to masquerade as script evidence.
+3. **The ledger cannot be overwritten**: writing a metric of the same name again requires a `revise_reason`, and the old value is kept as a historical version (`revision` + `superseded_by`); default queries see only the currently effective version.
+4. **Breaker on consecutive failures**: three accumulated `failed` runs on one experiment line automatically set it to `paused`; registering new runs and spawning workers are both refused, and `lab_line_resume` must state what was investigated before the line resumes. The state card reports only items that need attention (paused lines, verification mismatches, workers awaiting collection, open claims); normal state is folded into one line.
+5. **Execution lock**: only one process may write to an experiment line at a time. `registerRun` takes the line automatically (holder is the current process pid); re-entry from the same process renews the lease; another process is refused while an unexpired lock is held, and is told the holder and heartbeat time; after the process dies the lease (90 minutes by default) expires and the line can be taken over. The lock is released automatically when the run reaches a terminal state and no worker on the line is in progress; `forceReleaseLineLock` also allows manual cleanup. Cross-process parallelism therefore exists only across lines, never within one line.
+6. **Activity log**: every ledger mutation writes an `activity` row: line creation/fork, run registration, status transitions, metric records and revisions, artifact mounts, claim insertion/deletion and adjudication, verification verdicts, worker birth/death, lock acquire/takeover/release, breaker trips. `lab_activity` queries by line, run or action type, for troubleshooting and for writing experiment records.
+7. **Input snapshot and drift detection**: a successful `lab_eval_run_python` copies the evaluator script into `runs/<run_key>/snapshot/src/` and records the script sha256, data file hashes, Python environment fingerprint (interpreter + pip freeze hash) and git state (commit + uncommitted changes), with the manifest written to `snapshot/manifest.json`. Before re-verification the current script hash is compared against the registered value: a mismatch lands as `drift` (the code has moved on, reruns are not comparable) rather than being misjudged as fabricated data; when hashes match, the snapshot copy is preferred for the rerun. A drifted run cannot be marked complete, and both the state card and collect surface the condition.
 
-## 核心模块
+## Core modules
 
-| 文件 | 职责 |
+| File | Responsibility |
 | --- | --- |
-| store.ts | 实验账本：lines、runs、metrics、artifacts、claims、workers、line_locks、councils、council_messages、activity（node:sqlite） |
-| recall.ts | 指标轨迹检索与实验线认知摘要 |
-| resilient.ts | 可靠 LLM 调用底座（探活回退、失败三分类、审计） |
-| stats.ts | Wilcoxon 符号秩（n≤16 精确枚举）、配对 t、胜平负 |
-| compare.ts | 实验线与逐场景配对对比，含未决判断方向核对 |
-| pool.ts | 任务池校验、难度带双向筛选、分布统计 |
-| eval.ts | Python 评测脚本编排（独立子进程、硬超时、解释器探测） |
-| verify.ts | 独立复核：重跑评测命令，重跑结果与账本指标逐项比对；漂移检测优先于数值比对 |
-| snapshot.ts | 输入快照：脚本副本、数据/环境/git 指纹清单，供回溯与漂移判定 |
-| worker.ts | router/worker 进程编排 |
-| council.ts | 群聊评审纯函数层：未决质疑、blocking 闩锁、裁决门禁（fail-closed） |
+| store.ts | Experiment ledger: lines, runs, metrics, artifacts, claims, workers, line_locks, councils, council_messages, activity (node:sqlite) |
+| recall.ts | Metric trajectory retrieval and experiment-line cognitive summary |
+| resilient.ts | Reliable LLM call foundation (liveness failover, three-way failure classification, audit) |
+| stats.ts | Wilcoxon signed-rank (exact enumeration for n≤16), paired t, win/tie/loss |
+| compare.ts | Experiment-line and per-scenario paired comparison, including direction checks against open claims |
+| pool.ts | Task pool validation, bidirectional difficulty-band filtering, distribution statistics |
+| eval.ts | Python evaluator script orchestration (isolated subprocess, hard timeout, interpreter probing) |
+| verify.ts | Independent re-verification: rerun the evaluation command and compare the rerun results against the ledger metrics item by item; drift detection takes precedence over numeric comparison |
+| snapshot.ts | Input snapshot: script copy, data/environment/git fingerprint manifest, for retrospection and drift determination |
+| worker.ts | Router/worker process orchestration |
+| council.ts | Group-chat review pure-function layer: open challenges, blocking latch, verdict gate (fail-closed) |
 
-## 群聊评审（council）
+## Group-chat review (council)
 
-`lab_council_open / post / read / verdict` 四个工具支撑 executor、auditor、chair 三角色围绕同一份共享会话记录对抗质证：executor 如实汇报任务书完成情况，auditor 只读账本与工件并逐项质疑（缺陷按 `severity=blocking` 分级），chair 通读记录后裁决 approved 或 rejected。blocking 质疑在本场 council 内终身未决，approved 前必须清零，且「引用约束式放行」在账本层与工具层均被拒绝；run 完成门禁要求存在覆盖该 run 且状态为 approved 的 council，rejected 与 expired 一律按 fail-closed 处理。
+The four tools `lab_council_open / post / read / verdict` support three roles — executor, auditor and chair — cross-examining each other around a single shared transcript: the executor truthfully reports on completion of the task brief, the auditor reads the ledger and artifacts read-only and challenges item by item (defects graded with `severity=blocking`), and the chair reads through the record and returns a verdict of approved or rejected. A blocking challenge is a lifetime latch within that council and must reach zero before `approved`; "constraint-qualified release" is refused at both the ledger layer and the tool layer. The run completion gate requires a council covering the run with status approved; rejected and expired are handled as fail-closed without exception.
