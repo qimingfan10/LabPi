@@ -1,0 +1,137 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1200" viewBox="0 0 1200 1200" font-family="ui-monospace, SFMono-Regular, 'Cascadia Code', Consolas, 'Liberation Mono', monospace">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/>
+    </marker>
+    <marker id="arrB" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#58a6ff"/>
+    </marker>
+    <marker id="arrO" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f0883e"/>
+    </marker>
+    <marker id="arrG" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/>
+    </marker>
+    <marker id="arrR" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f85149"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="1200" fill="#0d1117"/>
+
+  <!-- ======================= Panel 1: Architecture ======================= -->
+  <rect x="30" y="24" width="1140" height="500" rx="14" fill="#11171f" stroke="#21262d"/>
+  <text x="60" y="58" font-size="13" letter-spacing="2.5" fill="#58a6ff">ARCHITECTURE</text>
+  <text x="1140" y="58" font-size="11" fill="#8b949e" text-anchor="end">three layers · one ledger</text>
+
+  <!-- skill layer -->
+  <rect x="250" y="84" width="700" height="64" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="600" y="112" font-size="15" text-anchor="middle">
+    <tspan fill="#8b949e">skill: </tspan><tspan fill="#79c0ff">labpi.mjs</tspan>
+  </text>
+  <text x="600" y="134" font-size="11.5" fill="#8b949e" text-anchor="middle">init · fork · dispatch · collect · verify · council · review …</text>
+
+  <line x1="600" y1="148" x2="600" y2="200" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="614" y="170" font-size="12" fill="#c9d1d9">spawn headless pi</text>
+  <text x="614" y="188" font-size="11" fill="#8b949e">LAB_LINE_ID · LAB_ROLE · LAB_RUNS_ROOT</text>
+
+  <!-- runtime layer -->
+  <rect x="200" y="204" width="800" height="104" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="600" y="232" font-size="15" text-anchor="middle">
+    <tspan fill="#e6edf3">headless pi runtime · </tspan><tspan fill="#79c0ff">agent-session.ts</tspan>
+  </text>
+  <text x="400" y="260" font-size="12" fill="#8b949e" text-anchor="middle"><tspan fill="#c9d1d9">labBeforeToolCheck</tspan> gates</text>
+  <text x="800" y="260" font-size="12" fill="#8b949e" text-anchor="middle"><tspan fill="#c9d1d9">transformContext</tspan> state card</text>
+  <text x="400" y="284" font-size="12" fill="#8b949e" text-anchor="middle">24+ <tspan fill="#c9d1d9">lab_*</tspan> tools</text>
+  <text x="800" y="284" font-size="12" fill="#8b949e" text-anchor="middle">completion gate: <tspan fill="#3fb950">verified + approved</tspan> council</text>
+
+  <line x1="600" y1="308" x2="600" y2="360" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="614" y="338" font-size="11" fill="#8b949e">lab_* reads · writes</text>
+
+  <!-- ledger layer -->
+  <rect x="160" y="364" width="880" height="140" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="600" y="392" font-size="15" text-anchor="middle">
+    <tspan fill="#e6edf3">lab ledger · </tspan><tspan fill="#79c0ff">runs/lab.db</tspan><tspan fill="#8b949e"> (node:sqlite WAL)</tspan>
+  </text>
+  <text x="400" y="418" font-size="12" fill="#8b949e" text-anchor="middle">lines · runs · metrics</text>
+  <text x="400" y="440" font-size="12" fill="#8b949e" text-anchor="middle">artifacts · claims · workers</text>
+  <text x="400" y="462" font-size="12" fill="#8b949e" text-anchor="middle">locks · activity</text>
+  <text x="800" y="418" font-size="12" fill="#8b949e" text-anchor="middle">hypotheses · novelty · questions</text>
+  <text x="800" y="440" font-size="12" fill="#8b949e" text-anchor="middle">evaluators · anchors · dispatches</text>
+  <text x="800" y="462" font-size="12" text-anchor="middle" fill="#bc8cff">councils · council_messages</text>
+  <line x1="200" y1="476" x2="1000" y2="476" stroke="#21262d"/>
+  <text x="200" y="494" font-size="10" letter-spacing="1.5" fill="#8b949e">VERIFY LADDER</text>
+  <text x="640" y="494" font-size="12" text-anchor="middle">
+    <tspan fill="#79c0ff">RESULT_JSON</tspan><tspan fill="#8b949e"> → </tspan><tspan fill="#c9d1d9">ledger compare</tspan><tspan fill="#8b949e"> → </tspan><tspan fill="#c9d1d9">paired test</tspan><tspan fill="#8b949e"> → </tspan><tspan fill="#c9d1d9">claim</tspan>
+  </text>
+
+  <!-- ======================= Panel 2: Council flow ======================= -->
+  <rect x="30" y="548" width="1140" height="624" rx="14" fill="#11171f" stroke="#21262d"/>
+  <text x="60" y="582" font-size="13" letter-spacing="2.5" fill="#bc8cff">COUNCIL FLOW</text>
+  <text x="1140" y="582" font-size="11" fill="#8b949e" text-anchor="end">router · worker · executor · auditor · chair</text>
+
+  <!-- router row -->
+  <rect x="100" y="608" width="280" height="64" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="240" y="636" font-size="15" fill="#e6edf3" text-anchor="middle">router</text>
+  <text x="240" y="657" font-size="11.5" fill="#8b949e" text-anchor="middle">skill dispatch</text>
+
+  <line x1="380" y1="640" x2="516" y2="640" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="448" y="630" font-size="11" fill="#8b949e" text-anchor="middle">spawn</text>
+
+  <rect x="520" y="608" width="280" height="64" rx="10" fill="#161b22" stroke="#30363d"/>
+  <text x="660" y="636" font-size="15" fill="#e6edf3" text-anchor="middle">worker</text>
+  <text x="660" y="657" font-size="11.5" fill="#8b949e" text-anchor="middle">runs experiment</text>
+
+  <line x1="800" y1="640" x2="896" y2="640" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr)"/>
+  <rect x="900" y="612" width="230" height="56" rx="8" fill="none" stroke="#238636" stroke-dasharray="4 3"/>
+  <text x="1015" y="645" font-size="12" text-anchor="middle"><tspan fill="#8b949e">run: </tspan><tspan fill="#3fb950">evidence-complete</tspan></text>
+
+  <!-- convene fork -->
+  <path d="M660,672 V696 H380 V712" fill="none" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <path d="M660,696 H820 V712" fill="none" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+  <text x="676" y="690" font-size="12" fill="#79c0ff"><tspan fill="#79c0ff">lab_council_open</tspan><tspan fill="#8b949e"> convenes</tspan></text>
+
+  <!-- executor / auditor -->
+  <rect x="200" y="716" width="360" height="100" rx="10" fill="#0f1620" stroke="#1f4a6e"/>
+  <circle cx="340" cy="742" r="4" fill="#58a6ff"/>
+  <text x="390" y="747" font-size="15" fill="#e6edf3" text-anchor="middle">executor</text>
+  <text x="380" y="772" font-size="12" fill="#8b949e" text-anchor="middle">reports evidence chain</text>
+  <text x="380" y="792" font-size="12" fill="#8b949e" text-anchor="middle">answers challenges</text>
+
+  <rect x="640" y="716" width="360" height="100" rx="10" fill="#161009" stroke="#6e4420"/>
+  <circle cx="784" cy="742" r="4" fill="#f0883e"/>
+  <text x="830" y="747" font-size="15" fill="#e6edf3" text-anchor="middle">auditor</text>
+  <text x="820" y="772" font-size="12" fill="#8b949e" text-anchor="middle">reads ledger + artifacts only</text>
+  <text x="820" y="792" font-size="12" fill="#8b949e" text-anchor="middle">severity: <tspan fill="#f85149">blocking</tspan> latches</text>
+
+  <!-- posts to transcript -->
+  <line x1="380" y1="816" x2="380" y2="868" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arrB)"/>
+  <text x="392" y="846" font-size="11" fill="#58a6ff">lab_council_post</text>
+  <line x1="820" y1="816" x2="820" y2="868" stroke="#f0883e" stroke-width="1.5" marker-end="url(#arrO)"/>
+  <text x="832" y="846" font-size="11" fill="#f0883e">lab_council_post</text>
+
+  <!-- shared transcript -->
+  <rect x="300" y="872" width="600" height="68" rx="10" fill="#12101c" stroke="#4c3a6e"/>
+  <text x="600" y="898" font-size="14" fill="#e6edf3" text-anchor="middle">shared transcript</text>
+  <text x="600" y="920" font-size="12" text-anchor="middle"><tspan fill="#bc8cff">councils · council_messages</tspan><tspan fill="#8b949e"> (lab.db)</tspan></text>
+
+  <line x1="600" y1="940" x2="600" y2="982" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- chair -->
+  <rect x="430" y="986" width="340" height="56" rx="10" fill="#12101c" stroke="#4c3a6e"/>
+  <circle cx="484" cy="1014" r="4" fill="#bc8cff"/>
+  <text x="610" y="1020" font-size="14" text-anchor="middle"><tspan fill="#e6edf3">chair · </tspan><tspan fill="#bc8cff">lab_council_verdict</tspan></text>
+
+  <!-- verdict split -->
+  <path d="M600,1042 V1066 H360 V1082" fill="none" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arrG)"/>
+  <path d="M600,1066 H840 V1082" fill="none" stroke="#3d444d" stroke-width="1.5" marker-end="url(#arrR)"/>
+
+  <!-- outcomes -->
+  <rect x="140" y="1086" width="440" height="64" rx="10" fill="#0f1a13" stroke="#238636"/>
+  <text x="360" y="1112" font-size="14" fill="#3fb950" text-anchor="middle" font-weight="bold">approved</text>
+  <text x="360" y="1134" font-size="12" fill="#8b949e" text-anchor="middle">completion gate releases</text>
+
+  <rect x="620" y="1086" width="440" height="64" rx="10" fill="#1a0f11" stroke="#b62324"/>
+  <text x="840" y="1112" font-size="14" fill="#f85149" text-anchor="middle" font-weight="bold">rejected · expired</text>
+  <text x="840" y="1134" font-size="12" fill="#8b949e" text-anchor="middle">run can never complete</text>
+</svg>

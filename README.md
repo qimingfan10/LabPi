@@ -40,13 +40,9 @@ On top of these: resilient LLM calls with endpoint failover and three-way failur
 
 ## Group-chat review architecture
 
-The current architecture and the router + group-chat hybrid it extends:
-
-![LabPi architecture](docs/council-architecture-current.png)
+![LabPi architecture](docs/labpi-council-diagram.svg)
 
 The council layer: executor, auditor and chair processes share one ledger-backed transcript; a blocking finding latches for the whole session, and the chair's verdict gates completion.
-
-![LabPi council architecture](docs/council-architecture-council.png)
 
 [Full interactive diagram](docs/council-architecture.html)
 
